@@ -31,15 +31,14 @@ struct SingleLayer {
   SingleLayer() = default;  // Default constructor, Tensor initialization happens automatically
 
   // Forward pass for single layer
-  void forward(const InputTensor& input, OutputTensor& logits_out) const {
+  OutputTensor forward(const InputTensor& input) const {
     // logits_out = W·input + b (no activation function, just linear)
-    auto temp_matmul_res = mat_vec_mul(W, input);
-    logits_out = vec_add(temp_matmul_res, b);
+    return mat_vec_mul(W, input) + b;
   }
 
   void update_weights(const SingleLayer& d_l, float learning_rate) {
-    for (size_t i = 0; i < W.numel(); ++i) W._data[i] -= learning_rate * d_l.W._data[i];
-    for (size_t i = 0; i < b.numel(); ++i) b._data[i] -= learning_rate * d_l.b._data[i];
+    W -= d_l.W * learning_rate;
+    b -= d_l.b * learning_rate;
   }
 };
 
@@ -56,21 +55,16 @@ struct NeuralNetwork {
   }
 
   // Forward pass for prediction
-  void forward(const InputTensor& input, OutputTensor& probs_out) const {
-    OutputTensor logits_buffer;
-    layer.forward(input, logits_buffer);
-    probs_out = softmax(logits_buffer);
+  OutputTensor forward(const InputTensor& input) const {
+    return softmax(layer.forward(input));
   }
 };
 
 // Loss function for the neural network
-// Note: input is now a template-based Tensor. Target is still int.
 // nn is passed by value for clad to differentiate its members.
 float nn_loss(const NeuralNetwork nn, const InputTensor input, int target) {
-  OutputTensor probs_buffer;
-  nn.forward(input, probs_buffer);
-  auto out = cross_entropy_loss(probs_buffer, target);  // Returns scalar tensor with the loss
-  return out.scalar();                                  // Get the scalar value from the tensor
+  auto out = cross_entropy_loss(nn.forward(input), target);  // Returns scalar tensor with the loss
+  return out.scalar(); // Get the scalar value from the tensor
 }
 
 // Simple classification function for generating synthetic data
@@ -145,10 +139,9 @@ int main() {
 
     InputTensor input;
     for (int j = 0; j < INPUT_SIZE; ++j) input.at(j) = input_buffer[j];
-
-    OutputTensor probs_out;
+    
     // Run forward pass
-    nn.forward(input, probs_out);
+    OutputTensor probs_out = nn.forward(input);
 
     // Find predicted class
     int pred_class = 0;
