@@ -1,6 +1,7 @@
 #ifndef CLAD_TENSOR_HPP_DYNAMIC
 #define CLAD_TENSOR_HPP_DYNAMIC
 
+#include "kernels.hpp" // Include kernel functions for operations
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -13,156 +14,7 @@
 #include <utility>
 #include <vector>
 
-// Simple assertion macro
-#define CLAD_ASSERT(condition, message) assert((condition) && message)
-
 namespace cladtorch {
-
-// -------------------- Kernel Functions (Operating on raw pointers) --------------------
-// These functions are low-level, high-performance routines that operate on raw C-style
-// arrays. They remain unchanged as their performance and interface are independent of
-// how the Tensor class manages its data.
-namespace kernels {
-
-inline float gelu_kernel(float x) {
-  return 0.5f * x * (1.0f + std::tanh(std::sqrt(2.0f / M_PI) * (x + 0.044715f * x * x * x)));
-}
-
-inline void softmax_kernel(const float* logits, float* probs, int size) {
-  if (size <= 0)
-    return;
-  float max_logit = logits[0];
-  for (int i = 1; i < size; ++i)
-    if (logits[i] > max_logit)
-      max_logit = logits[i];
-
-  float sum_exp = 0.0f;
-  for (int i = 0; i < size; ++i) {
-    probs[i] = std::exp(logits[i] - max_logit);
-    sum_exp += probs[i];
-  }
-
-  if (sum_exp == 0.0f)
-    sum_exp = 1e-9f;
-  for (int i = 0; i < size; ++i)
-    probs[i] /= sum_exp;
-}
-
-inline float cross_entropy_loss_kernel(const float* probs, int target_class, int size) {
-  if (target_class < 0 || target_class >= size)
-    return -std::log(1e-9f);
-  float prob_at_target = probs[target_class];
-  return -std::log(std::max(prob_at_target, 1e-9f));
-}
-
-inline void mat_vec_mul_kernel(const float* mat, const float* vec, float* result, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    result[i] = 0.0f;
-    for (int j = 0; j < cols; ++j)
-      result[i] += mat[i * cols + j] * vec[j];
-  }
-}
-
-inline void mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
-                           size_t C2) {
-  for (size_t i = 0; i < R; ++i) {
-    for (size_t j = 0; j < C2; ++j) {
-      float sum = 0.0f;
-      for (size_t k = 0; k < C1; ++k)
-        sum += a_data[i * C1 + k] * b_data[k * C2 + j];
-      result_data[i * C2 + j] = sum;
-    }
-  }
-}
-
-inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t batch_size,
-                                   size_t R, size_t C1, size_t C2) {
-  size_t a_batch_stride = R * C1;
-  size_t b_batch_stride = C1 * C2;
-  size_t result_batch_stride = R * C2;
-
-  for (size_t batch = 0; batch < batch_size; ++batch) {
-    const float* a_batch = a_data + batch * a_batch_stride;
-    const float* b_batch = b_data + batch * b_batch_stride;
-    float* result_batch = result_data + batch * result_batch_stride;
-    mat_mul_kernel(a_batch, b_batch, result_batch, R, C1, C2);
-  }
-}
-
-inline void element_wise_add_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] + b[i];
-}
-inline void element_wise_sub_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] - b[i];
-}
-inline void element_wise_mul_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] * b[i];
-}
-inline void scalar_mul_kernel(const float* in, float s, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = in[i] * s;
-}
-inline void scalar_div_kernel(const float* in, float s, float* r, size_t n) {
-  CLAD_ASSERT(s != 0.0f, "Division by zero.");
-  for (size_t i = 0; i < n; ++i)
-    r[i] = in[i] / s;
-}
-
-template <typename T>
-inline void lookup_kernel(const T* src_data, const int* indices, T* dst_data, 
-                         size_t num_indices, size_t src_first_dim, size_t slice_size) {
-  for (size_t i = 0; i < num_indices; ++i) {
-    int idx = indices[i];
-    CLAD_ASSERT(idx >= 0 && idx < (int)src_first_dim, "Index out of bounds in lookup.");
-    
-    const T* src_slice = src_data + idx * slice_size;
-    T* dst_slice = dst_data + i * slice_size;
-    
-    for (size_t j = 0; j < slice_size; ++j) {
-      dst_slice[j] = src_slice[j];
-    }
-  }
-}
-
-inline float vec_mean_kernel(size_t vec_size, const float* src) {
-  float sum = 0.0f;
-  for (size_t i = 0; i < vec_size; i++) {
-    sum += src[i];
-  }
-  return sum / vec_size;
-}
-
-inline float vec_rstd_kernel(size_t vec_size, const float* src, float mean) {
-  float eps = 1e-5f;
-  float sum = 0.0f;
-  for (size_t i = 0; i < vec_size; i++) {
-    float diff = src[i] - mean;
-    sum += diff * diff;
-  }
-  float var = sum / vec_size;
-  return 1.0f / std::sqrt(var + eps);
-}
-
-inline void norm_kernel(const float* src_data, float* dst_data, size_t num_vectors, size_t vec_size) {
-  for (size_t idx = 0; idx < num_vectors; ++idx) {
-    const float* vec = src_data + idx * vec_size;
-    float* out = dst_data + idx * vec_size;
-    
-    // Calculate the mean and the rstd (without bias correction)
-    float mean = vec_mean_kernel(vec_size, vec);
-    float rstd = vec_rstd_kernel(vec_size, vec, mean);
-    
-    for (size_t i = 0; i < vec_size; i++) {
-      out[i] = (vec[i] - mean) * rstd;
-    }
-  }
-}
-
-} // namespace kernels
-
 // -------------------- Dynamic-Shape Tensor Class --------------------
 template <typename T> class Tensor {
 public:
@@ -383,27 +235,23 @@ public:
   Tensor<T> lookup(const Tensor<int>& indices) const {
     CLAD_ASSERT(ndim() > 0, "Cannot lookup from a scalar tensor.");
     CLAD_ASSERT(_data != nullptr, "Cannot lookup from null data tensor.");
-    
+
     // Calculate the size of each slice (everything after the first dimension)
     size_t slice_size = 1;
-    for (size_t i = 1; i < ndim(); ++i) {
+    for (size_t i = 1; i < ndim(); ++i)
       slice_size *= _shape[i];
-    }
-    
+
     // Create result shape: [indices.num_elements(), remaining dimensions...]
     std::vector<size_t> result_shape;
     result_shape.push_back(indices.num_elements());
-    for (size_t i = 1; i < ndim(); ++i) {
+    for (size_t i = 1; i < ndim(); ++i)
       result_shape.push_back(_shape[i]);
-    }
-    
+
     Tensor<T> result(result_shape);
-    
-    if (indices.num_elements() > 0) {
-      kernels::lookup_kernel(_data, indices.data(), result.data(), 
-                           indices.num_elements(), _shape[0], slice_size);
-    }
-    
+
+    if (indices.num_elements() > 0)
+      kernels::lookup_kernel(_data, indices.data(), result.data(), indices.num_elements(), _shape[0], slice_size);
+
     return result;
   }
 
@@ -412,21 +260,96 @@ public:
     static_assert(std::is_same_v<T, float>, "norm() is only supported for float tensors.");
     CLAD_ASSERT(ndim() > 0, "Cannot normalize a scalar tensor.");
     CLAD_ASSERT(_data != nullptr, "Cannot normalize null data tensor.");
-    
+
     Tensor<T> result(_shape);
-    
-    if (_num_elements == 0) {
+
+    if (_num_elements == 0)
       return result;
-    }
-    
+
     // Calculate number of vectors and vector size
     size_t vec_size = _shape.back(); // Last dimension
     size_t num_vectors = _num_elements / vec_size;
-    
+
     kernels::norm_kernel(_data, result.data(), num_vectors, vec_size);
-    
+
     return result;
   }
+
+  // Create a view (slice) of the tensor along specified axis at given offset
+  Tensor<T> view(const std::vector<size_t>& new_shape, size_t split_no = 0, size_t split_axis = 0) const {
+    CLAD_ASSERT(split_axis < ndim(), "Split axis out of bounds.");
+    CLAD_ASSERT(new_shape.size() == ndim(), "View shape must have same number of dimensions.");
+    CLAD_ASSERT(_data != nullptr, "Cannot create view of null data tensor.");
+
+    // Calculate offset for this split
+    size_t split_size = new_shape[split_axis];
+    size_t offset = split_no * split_size;
+    CLAD_ASSERT(offset + split_size <= _shape[split_axis], "View extends beyond tensor bounds.");
+
+    Tensor<T> result(new_shape);
+
+    if (result._num_elements == 0)
+      return result;
+
+    kernels::view_kernel(_data, result.data(), _shape, _strides, new_shape, result._strides, split_axis, offset);
+
+    return result;
+  }
+
+  // Split tensor along specified axis into chunks of given size
+  std::vector<Tensor<T>> split(size_t size, size_t axis) const {
+    CLAD_ASSERT(axis < ndim(), "Split axis out of bounds.");
+    CLAD_ASSERT(_shape[axis] % size == 0, "Dimension size must be divisible by split size.");
+    CLAD_ASSERT(_data != nullptr, "Cannot split null data tensor.");
+
+    std::vector<Tensor<T>> tensors;
+
+    if (_shape[axis] == size) {
+      // If split size equals dimension size, return copy of this tensor
+      tensors.push_back(*this);
+      return tensors;
+    }
+
+    // Create new shape for each split
+    std::vector<size_t> split_shape = _shape;
+    split_shape[axis] = size;
+
+    size_t num_splits = _shape[axis] / size;
+    for (size_t i = 0; i < num_splits; ++i)
+      tensors.push_back(view(split_shape, i, axis));
+
+    return tensors;
+  }
+
+  // Transpose two dimensions of the tensor
+  Tensor<T> transpose(size_t dim0, size_t dim1) const {
+    CLAD_ASSERT(dim0 < ndim() && dim1 < ndim(), "Transpose dimensions out of bounds.");
+    CLAD_ASSERT(_data != nullptr, "Cannot transpose null data tensor.");
+
+    if (dim0 == dim1) {
+      // No-op transpose, return copy
+      return *this;
+    }
+
+    // Create transposed shape
+    std::vector<size_t> new_shape = _shape;
+    std::swap(new_shape[dim0], new_shape[dim1]);
+
+    Tensor<T> result(new_shape);
+
+    if (_num_elements == 0)
+      return result;
+
+    kernels::transpose_kernel(_data, result.data(), _shape, _strides, result._strides, dim0, dim1);
+
+    return result;
+  }
+
+  // Convenience method for 2D matrix transpose (swap dimensions 0 and 1)
+  // Tensor<T> T() const {
+  //   CLAD_ASSERT(ndim() >= 2, "Matrix transpose requires at least 2 dimensions.");
+  //   return transpose(ndim() - 2, ndim() - 1);  // Transpose last two dimensions
+  // }
 
   // --- Operator Overloads ---
   Tensor& operator+=(const Tensor& other) {
@@ -540,12 +463,16 @@ template <typename T> Tensor<T> gelu(const Tensor<T>& in) {
   return r;
 }
 
-template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) {
-  return src.lookup(indices);
+template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) { return src.lookup(indices); }
+
+template <typename T> Tensor<T> norm(const Tensor<T>& input) { return input.norm(); }
+
+template <typename T> std::vector<Tensor<T>> split(const Tensor<T>& input, size_t size, size_t axis) {
+  return input.split(size, axis);
 }
 
-template <typename T> Tensor<T> norm(const Tensor<T>& input) {
-  return input.norm();
+template <typename T> Tensor<T> transpose(const Tensor<T>& input, size_t dim0, size_t dim1) {
+  return input.transpose(dim0, dim1);
 }
 
 } // namespace cladtorch
