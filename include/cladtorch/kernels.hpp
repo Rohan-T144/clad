@@ -113,16 +113,16 @@ inline void lookup_kernel(const T* src_data, const int* indices, T* dst_data, si
 }
 
 template <typename T>
-inline void view_kernel(const T* src_data, T* dst_data, const std::vector<size_t>& src_shape,
-                        const std::vector<size_t>& src_strides, const std::vector<size_t>& dst_shape,
-                        const std::vector<size_t>& dst_strides, size_t split_axis, size_t offset) {
+inline void view_kernel(const T* src_data, T* dst_data, const std::vector<int>& src_shape,
+                        const std::vector<int>& src_strides, const std::vector<int>& dst_shape,
+                        const std::vector<int>& dst_strides, size_t split_axis, size_t offset) {
   size_t dst_elements = 1;
   for (size_t dim : dst_shape)
     dst_elements *= dim;
 
   for (size_t dst_idx = 0; dst_idx < dst_elements; ++dst_idx) {
     // Convert flat index to multi-dimensional indices for dst
-    std::vector<size_t> dst_coords(dst_shape.size());
+    std::vector<int> dst_coords(dst_shape.size());
     size_t temp_idx = dst_idx;
     for (long i = dst_shape.size() - 1; i >= 0; --i) {
       dst_coords[i] = temp_idx % dst_shape[i];
@@ -130,7 +130,7 @@ inline void view_kernel(const T* src_data, T* dst_data, const std::vector<size_t
     }
 
     // Map dst coordinates to src coordinates
-    std::vector<size_t> src_coords = dst_coords;
+    std::vector<int> src_coords = dst_coords;
     src_coords[split_axis] += offset;
 
     // Convert src coordinates to flat index
@@ -143,8 +143,8 @@ inline void view_kernel(const T* src_data, T* dst_data, const std::vector<size_t
 }
 
 template <typename T>
-inline void transpose_kernel(const T* src_data, T* dst_data, const std::vector<size_t>& src_shape,
-                             const std::vector<size_t>& src_strides, const std::vector<size_t>& dst_strides,
+inline void transpose_kernel(const T* src_data, T* dst_data, const std::vector<int>& src_shape,
+                             const std::vector<int>& src_strides, const std::vector<int>& dst_strides,
                              size_t dim0, size_t dim1) {
   size_t total_elements = 1;
   for (size_t dim : src_shape)
@@ -152,7 +152,7 @@ inline void transpose_kernel(const T* src_data, T* dst_data, const std::vector<s
 
   for (size_t src_idx = 0; src_idx < total_elements; ++src_idx) {
     // Convert flat index to multi-dimensional coordinates
-    std::vector<size_t> coords(src_shape.size());
+    std::vector<int> coords(src_shape.size());
     size_t temp_idx = src_idx;
     for (long i = src_shape.size() - 1; i >= 0; --i) {
       coords[i] = temp_idx % src_shape[i];
@@ -200,6 +200,82 @@ inline void norm_kernel(const float* src_data, float* dst_data, size_t num_vecto
 
     for (size_t i = 0; i < vec_size; i++)
       out[i] = (vec[i] - mean) * rstd;
+  }
+}
+
+template <typename T>
+inline void broadcast_kernel(const T* src_data, T* dst_data, 
+                           const std::vector<int>& src_shape, const std::vector<int>& src_strides,
+                           const std::vector<int>& dst_shape, const std::vector<int>& dst_strides) {
+  size_t total_elements = 1;
+  for (int dim : dst_shape)
+    total_elements *= dim;
+    
+  for (size_t dst_idx = 0; dst_idx < total_elements; ++dst_idx) {
+    // Convert flat index to multi-dimensional coordinates for dst
+    std::vector<int> dst_coords(dst_shape.size());
+    size_t temp_idx = dst_idx;
+    for (long i = dst_shape.size() - 1; i >= 0; --i) {
+      dst_coords[i] = temp_idx % dst_shape[i];
+      temp_idx /= dst_shape[i];
+    }
+    
+    // Map dst coordinates to src coordinates with broadcasting
+    std::vector<int> src_coords(src_shape.size(), 0);
+    int src_dim = src_shape.size() - 1;
+    for (int dst_dim = dst_shape.size() - 1; dst_dim >= 0 && src_dim >= 0; --dst_dim, --src_dim) {
+      if (src_shape[src_dim] == 1) {
+        src_coords[src_dim] = 0;  // Broadcast dimension
+      } else {
+        src_coords[src_dim] = dst_coords[dst_dim];
+      }
+    }
+    
+    // Convert src coordinates to flat index
+    size_t src_idx = 0;
+    for (size_t i = 0; i < src_coords.size(); ++i)
+      src_idx += src_coords[i] * src_strides[i];
+      
+    dst_data[dst_idx] = src_data[src_idx];
+  }
+}
+
+template <typename T>
+inline void broadcast_add_kernel(const T* a_data, const T* b_data, T* result_data,
+                               const std::vector<int>& a_shape, const std::vector<int>& a_strides,
+                               const std::vector<int>& b_shape, const std::vector<int>& b_strides,
+                               const std::vector<int>& result_shape, const std::vector<int>& result_strides) {
+  size_t total_elements = 1;
+  for (int dim : result_shape)
+    total_elements *= dim;
+    
+  for (size_t result_idx = 0; result_idx < total_elements; ++result_idx) {
+    // Convert flat index to multi-dimensional coordinates
+    std::vector<int> coords(result_shape.size());
+    size_t temp_idx = result_idx;
+    for (long i = result_shape.size() - 1; i >= 0; --i) {
+      coords[i] = temp_idx % result_shape[i];
+      temp_idx /= result_shape[i];
+    }
+    
+    // Get indices for a and b with broadcasting
+    size_t a_idx = 0, b_idx = 0;
+    
+    // Map to a coordinates
+    int a_dim = a_shape.size() - 1;
+    for (int coord_dim = coords.size() - 1; coord_dim >= 0 && a_dim >= 0; --coord_dim, --a_dim) {
+      int a_coord = (a_shape[a_dim] == 1) ? 0 : coords[coord_dim];
+      a_idx += a_coord * a_strides[a_dim];
+    }
+    
+    // Map to b coordinates  
+    int b_dim = b_shape.size() - 1;
+    for (int coord_dim = coords.size() - 1; coord_dim >= 0 && b_dim >= 0; --coord_dim, --b_dim) {
+      int b_coord = (b_shape[b_dim] == 1) ? 0 : coords[coord_dim];
+      b_idx += b_coord * b_strides[b_dim];
+    }
+    
+    result_data[result_idx] = a_data[a_idx] + b_data[b_idx];
   }
 }
 
