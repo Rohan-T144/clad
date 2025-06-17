@@ -288,9 +288,8 @@ public:
     for (int i = 1; i < ndim(); ++i)
       slice_size *= _shape[i];
 
-    // Create result shape: [indices.num_elements(), remaining dimensions...]
-    std::vector<int> result_shape;
-    result_shape.push_back(indices.num_elements());
+    // Create result shape: preserve indices shape and append remaining dimensions
+    std::vector<int> result_shape = indices.shape();
     for (int i = 1; i < ndim(); ++i)
       result_shape.push_back(_shape[i]);
 
@@ -323,7 +322,7 @@ public:
   }
 
   // Create a view (slice) of the tensor along specified axis at given offset
-  Tensor<T> view(const std::vector<int>& new_shape, int split_no = 0, int split_axis = 0) const {
+  Tensor<T> view(const std::vector<int>& new_shape, int split_axis = 0, int split_no = 0) const {
     CLAD_ASSERT(split_axis < ndim(), "Split axis out of bounds.");
     CLAD_ASSERT(new_shape.size() == ndim(), "View shape must have same number of dimensions.");
     CLAD_ASSERT(_data != nullptr, "Cannot create view of null data tensor.");
@@ -340,6 +339,26 @@ public:
 
     kernels::view_kernel(_data, result.data(), _shape, _strides, new_shape, result._strides, split_axis, offset);
 
+    return result;
+  }
+
+  // Reshape tensor to new dimensions (total number of elements must match)
+  Tensor<T> reshape(const std::vector<int>& new_shape) const {
+    CLAD_ASSERT(_data != nullptr, "Cannot reshape null data tensor.");
+    
+    // Calculate total elements in new shape
+    int new_elements = 1;
+    for (int dim : new_shape)
+      new_elements *= dim;
+    
+    CLAD_ASSERT(new_elements == _num_elements, "New shape must have same total number of elements.");
+    
+    Tensor<T> result(new_shape);
+    
+    // Simple copy since we're just changing the shape interpretation
+    for (int i = 0; i < _num_elements; ++i)
+      result._data[i] = _data[i];
+    
     return result;
   }
 
@@ -363,7 +382,7 @@ public:
 
     int num_splits = _shape[axis] / size;
     for (int i = 0; i < num_splits; ++i)
-      tensors.push_back(view(split_shape, i, axis));
+      tensors.push_back(view(split_shape, axis, i));
 
     return tensors;
   }
@@ -586,7 +605,49 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     return result;
   }
   
-  // Case 3: Matrix-Vector Multiplication (2D x 1D)
+  // Case 3: Batched Matrix-Matrix Multiplication (3D x 2D)
+  // Input: (B, T, C) x Weight: (C, out_features) -> Output: (B, T, out_features)
+  if (a.ndim() == 3 && b.ndim() == 2) {
+    CLAD_ASSERT(a.size(2) == b.size(0), "Inner dimensions must match for batched matmul (a.shape[2] == b.shape[0]).");
+    int B = a.size(0), seq_len = a.size(1), C = a.size(2), out_features = b.size(1);
+    Tensor<T> result({B, seq_len, out_features});
+    
+    // Reshape the 3D input to 2D: (B*seq_len, C)
+    Tensor<T> a_reshaped = a.reshape({B * seq_len, C});
+    
+    // Perform 2D matrix multiplication: (B*seq_len, C) x (C, out_features) -> (B*seq_len, out_features)
+    kernels::mat_mul_kernel(a_reshaped.data(), b.data(), result.data(), B * seq_len, C, out_features);
+    
+    return result;
+  }
+  
+  // Case 4: 4D x 4D batched multi-head attention matmul
+  // Input: (B, H, T, d) x (B, H, d, T) -> Output: (B, H, T, T)
+  if (a.ndim() == 4 && b.ndim() == 4) {
+    CLAD_ASSERT(a.size(0) == b.size(0), "Batch dimensions must match for 4D matmul (a.shape[0] == b.shape[0]).");
+    CLAD_ASSERT(a.size(1) == b.size(1), "Head dimensions must match for 4D matmul (a.shape[1] == b.shape[1]).");
+    CLAD_ASSERT(a.size(3) == b.size(2), "Inner dimensions must match for 4D matmul (a.shape[3] == b.shape[2]).");
+    
+    int B = a.size(0), H = a.size(1), T1 = a.size(2), d = a.size(3), T2 = b.size(3);
+    Tensor<T> result({B, H, T1, T2});
+    
+    // Treat as batched 2D matrix multiplication: (B*H) batches of (T1, d) x (d, T2)
+    int batch_size = B * H;
+    int a_matrix_size = T1 * d;
+    int b_matrix_size = d * T2;
+    int result_matrix_size = T1 * T2;
+    
+    for (int batch = 0; batch < batch_size; ++batch) {
+      const T* a_batch = a.data() + batch * a_matrix_size;
+      const T* b_batch = b.data() + batch * b_matrix_size;
+      T* result_batch = result.data() + batch * result_matrix_size;
+      kernels::mat_mul_kernel(a_batch, b_batch, result_batch, T1, d, T2);
+    }
+    
+    return result;
+  }
+  
+  // Case 5: Matrix-Vector Multiplication (2D x 1D)
   if (a.ndim() == 2 && b.ndim() == 1) {
     CLAD_ASSERT(a.size(1) == b.size(0), "Inner dimensions must match for mat-vec mul (a.shape[1] == b.shape[0]).");
     int R = a.size(0), C = a.size(1);
