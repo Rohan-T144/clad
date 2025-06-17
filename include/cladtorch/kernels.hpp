@@ -14,24 +14,62 @@ inline float gelu_kernel(float x) {
   return 0.5f * x * (1.0f + std::tanh(std::sqrt(2.0f / M_PI) * (x + 0.044715f * x * x * x)));
 }
 
-inline void softmax_kernel(const float* logits, float* probs, int size) {
-  if (size <= 0)
-    return;
-  float max_logit = logits[0];
-  for (int i = 1; i < size; ++i)
-    if (logits[i] > max_logit)
-      max_logit = logits[i];
+inline void softmax_kernel(const float* logits, float* probs, int size, int end, int vocab_size) {
+  CLAD_ASSERT(size > 0, "Softmax kernel requires size > 0");
+  CLAD_ASSERT(end > 0, "Softmax kernel requires end > 0");
+  CLAD_ASSERT(end <= size, "End index cannot exceed size");
+  
+  int V = vocab_size > 0 ? vocab_size : size;
 
-  float sum_exp = 0.0f;
-  for (int i = 0; i < size; ++i) {
-    probs[i] = std::exp(logits[i] - max_logit);
-    sum_exp += probs[i];
+  // Find maximum value for numerical stability
+  float maxv = -10000.0f;
+  for (size_t j = 0; j < end; j++) {
+      maxv = fmaxf(maxv, logits[j]);
   }
 
-  if (sum_exp == 0.0f)
-    sum_exp = 1e-9f;
-  for (int i = 0; i < size; ++i)
-    probs[i] /= sum_exp;
+  // Compute exponentials and sum
+  float sum = 0.0f;
+  for (size_t j = 0; j < end; j++) {
+      probs[j] = expf(logits[j] - maxv);
+      sum += probs[j];
+  }
+
+  // Normalize probabilities (handle division by zero)
+  if (sum > 0.0f) {
+    float inv_sum = 1.0f / sum;
+    for (size_t j = 0; j < (size_t)end; j++) {
+        probs[j] = probs[j] * inv_sum;
+    }
+  } else {
+    // If sum is zero, set uniform distribution over valid range
+    float uniform_prob = 1.0f / end;
+    for (size_t j = 0; j < (size_t)end; j++) {
+        probs[j] = uniform_prob;
+    }
+  }
+
+  // [end, V) is padded with 0.0f due to the causal mask
+  // [V, m) is padded with 0.0f due to the padded vocab
+  for (size_t j = end; j < size; j++) {
+      probs[j] = 0.0f;
+  }
+  // if (size <= 0)
+  //   return;
+  // float max_logit = logits[0];
+  // for (int i = 1; i < size; ++i)
+  //   if (logits[i] > max_logit)
+  //     max_logit = logits[i];
+
+  // float sum_exp = 0.0f;
+  // for (int i = 0; i < size; ++i) {
+  //   probs[i] = std::exp(logits[i] - max_logit);
+  //   sum_exp += probs[i];
+  // }
+
+  // if (sum_exp == 0.0f)
+  //   sum_exp = 1e-9f;
+  // for (int i = 0; i < size; ++i)
+  //   probs[i] /= sum_exp;
 }
 
 inline float cross_entropy_loss_kernel(const float* probs, int target_class, int size) {
