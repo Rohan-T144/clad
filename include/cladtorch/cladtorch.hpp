@@ -660,19 +660,55 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
   return Tensor<T>(); // Should not be reached
 }
 
-template <typename T> Tensor<T> softmax(const Tensor<T>& input) {
+template <typename T> Tensor<T> softmax(const Tensor<T>& input, bool is_casual/* = false */, int vocab_size/* = 0 */) {
   CLAD_ASSERT(input.ndim() > 0, "Softmax requires at least one dimension.");
   Tensor<T> result(input.shape());
 
   int last_dim = input.shape().back();
   int num_vectors = input.num_elements() / last_dim;
 
-  for (int i = 0; i < num_vectors; ++i) {
-    const T* logits_slice = input.data() + i * last_dim;
-    T* probs_slice = result.data() + i * last_dim;
-    kernels::softmax_kernel(logits_slice, probs_slice, last_dim);
+  // For causal masking, we need to handle 2D+ tensors properly
+  if (input.ndim() >= 2 && is_casual) {
+    auto shape = input.shape();
+    int n = shape[shape.size() - 2];  // Second to last dimension (sequence length)
+    int m = shape[shape.size() - 1];  // Last dimension (vocab/feature size)
+    
+    // Calculate batch size (all dimensions except last two)
+    int batch_size = 1;
+    for (int i = 0; i < (int)shape.size() - 2; ++i) {
+      batch_size *= shape[i];
+    }
+    
+    for (int batch = 0; batch < batch_size; ++batch) {
+      for (int i = 0; i < n; ++i) {
+        const T* logits_slice = input.data() + batch * n * m + i * m;
+        T* probs_slice = result.data() + batch * n * m + i * m;
+        int V = vocab_size > 0 ? vocab_size : m;
+        size_t end = i + 1;  // Causal: can only attend to positions 0..i
+        end = std::min(end, (size_t)V);  // Don't exceed vocab size
+        kernels::softmax_kernel(logits_slice, probs_slice, m, end, vocab_size);
+      }
+    }
+  } else {
+    // Non-causal or 1D tensor: apply softmax normally
+    for (int i = 0; i < num_vectors; ++i) {
+      const T* logits_slice = input.data() + i * last_dim;
+      T* probs_slice = result.data() + i * last_dim;
+      int V = vocab_size > 0 ? vocab_size : last_dim;
+      size_t end = V;
+      kernels::softmax_kernel(logits_slice, probs_slice, last_dim, end, vocab_size);
+    }
   }
   return result;
+}
+
+// Convenience overloads
+// template <typename T> Tensor<T> softmax(const Tensor<T>& input) {
+//   return softmax(input, false, 0);
+// }
+
+template <typename T> Tensor<T> causal_softmax(const Tensor<T>& input, int vocab_size = 0) {
+  return softmax(input, true, vocab_size);
 }
 
 // Batched cross-entropy loss

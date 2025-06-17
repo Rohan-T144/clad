@@ -136,7 +136,7 @@ struct CausalSelfAttention {
     scores = scores * scale;
     
     // Apply softmax to get attention weights
-    auto attn_weights = softmax(scores);  // (B, num_heads, T, T)
+    auto attn_weights = softmax(scores, true, 0);  // (B, num_heads, T, T)
     
     // Apply attention weights to values
     auto attn_out = matmul(attn_weights, v);  // (B, num_heads, T, head_size)
@@ -262,11 +262,11 @@ struct GPT2 {
       }
     }
     
-    auto logits = transformer.forward(input, input_pos);
-        
-    // TODO: causal mask for logits if needed; vocab size/padding?
-    auto probs = softmax(logits);
+    auto hidden_states = transformer.forward(input, input_pos);
     
+    // Apply weight tying: use token embedding weights for final projection
+    auto logits = matmul(hidden_states, transformer.encoder.wte.transpose(0, 1));
+    auto probs = softmax(logits, false, config.vocab_size); // Softmax over vocabulary dimension
     return probs;
   }
 

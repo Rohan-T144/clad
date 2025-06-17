@@ -2,6 +2,7 @@
 
 #include "tokenizer.h"
 #include "dataloader.h"
+#include <cmath>
 uint32_t random_u32(uint64_t *state) {
     // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
     *state ^= *state >> 12;
@@ -28,7 +29,7 @@ int sample_mult(float *probs, int n, float coin) {
 
 int main() {
   GPT2 model("gpt2_124M.bin");
-  GPT2Config config = model.config;
+  const GPT2Config config = model.config;
 
   int B = 4;
   int T = 64;
@@ -47,13 +48,15 @@ int main() {
   std::cout << "generating:\n---\n";
   for (int t = 1; t < gen_max_length; t++) {
       auto probs_t = model.forward(gen_tokens);
-      // gpt2_forward(&model, gen_tokens, nullptr, B, T);
-      // float *probs = (float *)model.probs->data() + (size_t)(t - 1) * model.config.padded_vocab_size;
-      float *probs = probs_t.data() + (size_t)(t - 1) * config.padded_vocab_size;
+      float *probs = new float[config.padded_vocab_size];
+      for (int v = 0; v < config.padded_vocab_size; v++) {
+          probs[v] = probs_t.at(0, t - 1, v);  // Get probabilities for the first batch
+      }
+      
       float coin = random_f32(&rng_state);
       int next_token = sample_mult(probs, model.config.vocab_size, coin);
       gen_tokens.at(0, t) = next_token;  // Use the first batch for generation
-      // gen_tokens[t] = next_token;
+      
       if (tokenizer.init_ok) {
           const char *token_str = tokenizer_decode(&tokenizer, next_token);
           // TODO(ysg): resolve the mixed printf and std::cout
@@ -62,6 +65,7 @@ int main() {
           std::cout << next_token << " ";
       }
       std::cout << std::flush;
+      delete[] probs;
   }
   std::cout << "\n---\n";
 
