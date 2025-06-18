@@ -1,6 +1,8 @@
 #ifndef CLAD_TENSOR_HPP_DYNAMIC
 #define CLAD_TENSOR_HPP_DYNAMIC
 
+#include <Accelerate/Accelerate.h> // For optimized math operations on Apple platforms
+
 #include "kernels.hpp" // Include kernel functions for operations
 #include <algorithm>
 #include <cassert>
@@ -592,7 +594,8 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     CLAD_ASSERT(a_ptr->size(2) == b_ptr->size(1), "Inner dimensions must match for batched matmul (a.shape[2] == b.shape[1]).");
     int B = a_ptr->size(0), R = a_ptr->size(1), C1 = a_ptr->size(2), C2 = b_ptr->size(2);
     Tensor<T> result({B, R, C2});
-    kernels::batched_mat_mul_kernel(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
+    if (R%8==0) kernels::batched_mat_mul_kernel_unrolled(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
+    else kernels::batched_mat_mul_kernel(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
     return result;
   }
   
@@ -601,7 +604,8 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     CLAD_ASSERT(a.size(1) == b.size(0), "Inner dimensions must match for matmul (a.shape[1] == b.shape[0]).");
     int R = a.size(0), C1 = a.size(1), C2 = b.size(1);
     Tensor<T> result({R, C2});
-    kernels::mat_mul_kernel(a.data(), b.data(), result.data(), R, C1, C2);
+    if (R%8==0) kernels::mat_mul_kernel_unrolled(a.data(), b.data(), result.data(), R, C1, C2);
+    else kernels::mat_mul_kernel(a.data(), b.data(), result.data(), R, C1, C2);
     return result;
   }
   
@@ -616,7 +620,8 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     Tensor<T> a_reshaped = a.reshape({B * seq_len, C});
     
     // Perform 2D matrix multiplication: (B*seq_len, C) x (C, out_features) -> (B*seq_len, out_features)
-    kernels::mat_mul_kernel(a_reshaped.data(), b.data(), result.data(), B * seq_len, C, out_features);
+    if ((B*seq_len)%8==0) kernels::mat_mul_kernel_unrolled(a.data(), b.data(), result.data(), B * seq_len, C, out_features);
+    else kernels::mat_mul_kernel(a_reshaped.data(), b.data(), result.data(), B * seq_len, C, out_features);
     
     return result;
   }
@@ -641,7 +646,9 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
       const T* a_batch = a.data() + batch * a_matrix_size;
       const T* b_batch = b.data() + batch * b_matrix_size;
       T* result_batch = result.data() + batch * result_matrix_size;
-      kernels::mat_mul_kernel(a_batch, b_batch, result_batch, T1, d, T2);
+      // Use unrolled kernel for better performance
+      if (T1%8==0) kernels::mat_mul_kernel_unrolled(a_batch, b_batch, result_batch, T1, d, T2);
+      else kernels::mat_mul_kernel(a_batch, b_batch, result_batch, T1, d, T2);
     }
     
     return result;
