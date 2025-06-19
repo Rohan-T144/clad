@@ -30,7 +30,7 @@ class Linear {
 public:
   FTensor weight, bias;
   Linear(int in_features, int out_features) : weight({out_features, in_features}), bias({out_features}) {}
-  FTensor forward(const FTensor& input) const { return matmul(input, weight.transpose(0, 1)) + bias; }
+  FTensor forward(const FTensor& input) const { return linear(input, weight, bias); }
 };
 
 class LayerNorm {
@@ -170,8 +170,8 @@ private:
   }
 
   static Config read_config_from_file(FILE* file) {
-    std::vector<int> header(HEADER_SIZE);
-    if (fread(header.data(), sizeof(int), HEADER_SIZE, file) != HEADER_SIZE)
+    int header[HEADER_SIZE];
+    if (fread(header, sizeof(int), HEADER_SIZE, file) != HEADER_SIZE)
       throw std::runtime_error("Failed to read checkpoint header");
 
     if (header[0] != MAGIC_NUMBER)

@@ -1,9 +1,8 @@
 #include "llm.hpp"
-using namespace gpt2;
-#include "dataloader.h"
-#include "tokenizer.h"
-#include <cmath>
+#include "tokenizer.hpp"
 #include <iomanip>
+
+using namespace gpt2;
 
 uint32_t random_u32(uint64_t* state) {
   // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
@@ -35,15 +34,14 @@ int main() {
   int B = 4;
   int T = 64;
 
-  Tokenizer tokenizer;
-  tokenizer_init(&tokenizer, "gpt2_tokenizer.bin");
+  Tokenizer tokenizer("gpt2_tokenizer.bin");
 
   uint64_t rng_state = 1337;
   const int gen_max_length = 64;
   // int gen_tokens[B * T];
   ITensor gen_tokens({B, T});
   for (int i = 0; i < B * T; i++)
-    gen_tokens.at(i / T, i % T) = tokenizer.eot_token; // Initialize with end-of-text token
+    gen_tokens.at(i / T, i % T) = tokenizer.eot_token(); // Initialize with end-of-text token
 
   std::cout << "generating:\n---\n";
   std::cerr << std::setprecision(4);
@@ -63,10 +61,8 @@ int main() {
     double time_taken = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_nsec - start.tv_nsec) / 1e6;
     std::cerr << "[step " << t << ", " << time_taken << "ms] ";
 
-    if (tokenizer.init_ok) {
-      const char* token_str = tokenizer_decode(&tokenizer, next_token);
-      // TODO(ysg): resolve the mixed printf and std::cout
-      safe_printf(token_str);
+    if (tokenizer.is_initialized()) {
+      tokenizer.safe_print(next_token);
     } else {
       std::cout << next_token << " ";
     }

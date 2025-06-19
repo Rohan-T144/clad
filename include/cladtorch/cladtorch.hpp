@@ -594,8 +594,7 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     CLAD_ASSERT(a_ptr->size(2) == b_ptr->size(1), "Inner dimensions must match for batched matmul (a.shape[2] == b.shape[1]).");
     int B = a_ptr->size(0), R = a_ptr->size(1), C1 = a_ptr->size(2), C2 = b_ptr->size(2);
     Tensor<T> result({B, R, C2});
-    if (R%8==0) kernels::batched_mat_mul_kernel_unrolled(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
-    else kernels::batched_mat_mul_kernel(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
+    kernels::batched_mat_mul_kernel(a_ptr->data(), b_ptr->data(), result.data(), B, R, C1, C2);
     return result;
   }
   
@@ -604,8 +603,7 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     CLAD_ASSERT(a.size(1) == b.size(0), "Inner dimensions must match for matmul (a.shape[1] == b.shape[0]).");
     int R = a.size(0), C1 = a.size(1), C2 = b.size(1);
     Tensor<T> result({R, C2});
-    if (R%8==0) kernels::mat_mul_kernel_unrolled(a.data(), b.data(), result.data(), R, C1, C2);
-    else kernels::mat_mul_kernel(a.data(), b.data(), result.data(), R, C1, C2);
+    kernels::mat_mul_kernel(a.data(), b.data(), result.data(), R, C1, C2);
     return result;
   }
   
@@ -620,8 +618,7 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
     Tensor<T> a_reshaped = a.reshape({B * seq_len, C});
     
     // Perform 2D matrix multiplication: (B*seq_len, C) x (C, out_features) -> (B*seq_len, out_features)
-    if ((B*seq_len)%8==0) kernels::mat_mul_kernel_unrolled(a.data(), b.data(), result.data(), B * seq_len, C, out_features);
-    else kernels::mat_mul_kernel(a_reshaped.data(), b.data(), result.data(), B * seq_len, C, out_features);
+    kernels::mat_mul_kernel(a_reshaped.data(), b.data(), result.data(), B * seq_len, C, out_features);
     
     return result;
   }
@@ -647,8 +644,7 @@ template <typename T> Tensor<T> matmul(const Tensor<T>& a, const Tensor<T>& b) {
       const T* b_batch = b.data() + batch * b_matrix_size;
       T* result_batch = result.data() + batch * result_matrix_size;
       // Use unrolled kernel for better performance
-      if (T1%8==0) kernels::mat_mul_kernel_unrolled(a_batch, b_batch, result_batch, T1, d, T2);
-      else kernels::mat_mul_kernel(a_batch, b_batch, result_batch, T1, d, T2);
+      kernels::mat_mul_kernel(a_batch, b_batch, result_batch, T1, d, T2);
     }
     
     return result;
@@ -761,6 +757,46 @@ template <typename T> Tensor<T> transpose(const Tensor<T>& input, int dim0, int 
 
 template <typename T> Tensor<T> broadcast_to(const Tensor<T>& input, const std::vector<int>& target_shape) {
   return input.broadcast_to(target_shape);
+}
+
+// Optimized linear layer function: input @ weight.T + bias
+template <typename T> 
+Tensor<T> linear(const Tensor<T>& input, const Tensor<T>& weight, const Tensor<T>& bias) {
+  static_assert(std::is_same_v<T, float>, "Linear operation currently only supports float tensors");
+  
+  // Validate input shapes
+  CLAD_ASSERT(input.ndim() >= 2, "Input must have at least 2 dimensions");
+  CLAD_ASSERT(weight.ndim() == 2, "Weight must be 2-dimensional");
+  CLAD_ASSERT(bias.ndim() == 1, "Bias must be 1-dimensional");
+  
+  const auto& input_shape = input.shape();
+  const auto& weight_shape = weight.shape();
+  const auto& bias_shape = bias.shape();
+  
+  const int in_features = input_shape[input.ndim() - 1];
+  const int out_features = weight_shape[0];
+  
+  CLAD_ASSERT(weight_shape[1] == in_features, "Weight input dimension must match input features");
+  CLAD_ASSERT(bias_shape[0] == out_features, "Bias dimension must match weight output dimension");
+  
+  // Calculate output shape and batch_seq size
+  std::vector<int> output_shape = input_shape;
+  output_shape[output_shape.size() - 1] = out_features;
+  
+  const int batch_seq = input.num_elements() / in_features;
+  
+  // Create output tensor
+  Tensor<T> output(output_shape);
+  
+  // Call optimized kernel
+  kernels::linear_kernel(
+    input.data(), weight.data(), bias.data(), output.data(),
+    static_cast<size_t>(batch_seq), 
+    static_cast<size_t>(in_features), 
+    static_cast<size_t>(out_features)
+  );
+  
+  return output;
 }
 
 } // namespace cladtorch

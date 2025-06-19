@@ -49,23 +49,6 @@ inline void softmax_kernel(const float* logits, float* probs, int size, int end,
   // [V, m) is padded with 0.0f due to the padded vocab
   for (size_t j = end; j < size; j++)
     probs[j] = 0.0f;
-  // if (size <= 0)
-  //   return;
-  // float max_logit = logits[0];
-  // for (int i = 1; i < size; ++i)
-  //   if (logits[i] > max_logit)
-  //     max_logit = logits[i];
-
-  // float sum_exp = 0.0f;
-  // for (int i = 0; i < size; ++i) {
-  //   probs[i] = std::exp(logits[i] - max_logit);
-  //   sum_exp += probs[i];
-  // }
-
-  // if (sum_exp == 0.0f)
-  //   sum_exp = 1e-9f;
-  // for (int i = 0; i < size; ++i)
-  //   probs[i] /= sum_exp;
 }
 
 inline float cross_entropy_loss_kernel(const float* probs, int target_class, int size) {
@@ -83,8 +66,8 @@ inline void mat_vec_mul_kernel(const float* mat, const float* vec, float* result
   }
 }
 
-inline void mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
-                           size_t C2) {
+inline void mat_mul_kernel_naive(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
+                                 size_t C2) {
   for (size_t i = 0; i < R; ++i) {
     for (size_t j = 0; j < C2; ++j) {
       float sum = 0.0f;
@@ -96,9 +79,7 @@ inline void mat_mul_kernel(const float* a_data, const float* b_data, float* resu
 }
 
 static constexpr int UNROLL = 8;
-// TODO: Fuse bias addition into the kernel
-inline void mat_mul_kernel_unrolled(const float* __restrict a, const float* __restrict b, float* __restrict out,
-                                    size_t R, size_t C1, size_t C2) {
+inline void mat_mul_kernel_unrolled(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
   // we assume R % UNROLL == 0 (fall back otherwise)
   size_t RT = R; // R = B*T for us
   for (size_t r0 = 0; r0 < RT; r0 += UNROLL) {
@@ -106,7 +87,7 @@ inline void mat_mul_kernel_unrolled(const float* __restrict a, const float* __re
       // roll UNROLL outputs into registers
       float regs[UNROLL];
       for (int u = 0; u < UNROLL; ++u)
-        regs[u] = /* bias? */ 0.0f;
+        regs[u] = 0.0f;
       // inner "k" loop: load one weight and multiply–accumulate into all regs
       const float* brow = b + j;
       for (size_t k = 0; k < C1; ++k) {
@@ -124,18 +105,12 @@ inline void mat_mul_kernel_unrolled(const float* __restrict a, const float* __re
   }
 }
 
-inline void batched_mat_mul_kernel_unrolled(const float* a_data, const float* b_data, float* result_data, size_t batch_size,
-                                   size_t R, size_t C1, size_t C2) {
-  size_t a_batch_stride = R * C1;
-  size_t b_batch_stride = C1 * C2;
-  size_t result_batch_stride = R * C2;
-
-  for (size_t batch = 0; batch < batch_size; ++batch) {
-    const float* a_batch = a_data + batch * a_batch_stride;
-    const float* b_batch = b_data + batch * b_batch_stride;
-    float* result_batch = result_data + batch * result_batch_stride;
-    mat_mul_kernel_unrolled(a_batch, b_batch, result_batch, R, C1, C2);
-  }
+inline void mat_mul_kernel(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
+  // Dispatch to unrolled or regular kernel based on R
+  if (R % UNROLL == 0)
+    mat_mul_kernel_unrolled(a, b, out, R, C1, C2);
+  else
+    mat_mul_kernel_naive(a, b, out, R, C1, C2);
 }
 
 inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t batch_size,
@@ -150,6 +125,61 @@ inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, flo
     float* result_batch = result_data + batch * result_batch_stride;
     mat_mul_kernel(a_batch, b_batch, result_batch, R, C1, C2);
   }
+}
+
+// -------------------- Linear Layer Kernels (Fused Matrix Multiplication + Bias) --------------------
+
+inline void linear_kernel_naive(const float* input, const float* weight, const float* bias, float* output,
+                                 size_t batch_seq, size_t in_features, size_t out_features) {
+  // input: [batch_seq, in_features]
+  // weight: [out_features, in_features] 
+  // bias: [out_features]
+  // output: [batch_seq, out_features]
+  // Computes: output = input @ weight.T + bias
+  
+  for (size_t i = 0; i < batch_seq; ++i) {
+    for (size_t j = 0; j < out_features; ++j) {
+      float sum = bias[j]; // Start with bias
+      for (size_t k = 0; k < in_features; ++k) {
+        sum += input[i * in_features + k] * weight[j * in_features + k];
+      }
+      output[i * out_features + j] = sum;
+    }
+  }
+}
+
+inline void linear_kernel_unrolled(const float* input, const float* weight, const float* bias, float* output,
+                                   size_t batch_seq, size_t in_features, size_t out_features) {
+  // Unrolled version for better performance when batch_seq % UNROLL == 0
+  for (size_t i0 = 0; i0 < batch_seq; i0 += UNROLL) {
+    for (size_t j = 0; j < out_features; ++j) {
+      // Initialize registers with bias
+      float regs[UNROLL];
+      for (int u = 0; u < UNROLL; ++u)
+        regs[u] = bias[j];
+      
+      // Accumulate input * weight for each output feature
+      for (size_t k = 0; k < in_features; ++k) {
+        float w = weight[j * in_features + k];
+        for (int u = 0; u < UNROLL; ++u) {
+          regs[u] += input[(i0 + u) * in_features + k] * w;
+        }
+      }
+      
+      // Write back results
+      for (int u = 0; u < UNROLL; ++u)
+        output[(i0 + u) * out_features + j] = regs[u];
+    }
+  }
+}
+
+inline void linear_kernel(const float* input, const float* weight, const float* bias, float* output,
+                          size_t batch_seq, size_t in_features, size_t out_features) {
+  // Dispatch to unrolled or regular kernel based on batch_seq
+  if (batch_seq % UNROLL == 0 && batch_seq >= UNROLL)
+    linear_kernel_unrolled(input, weight, bias, output, batch_seq, in_features, out_features);
+  else
+    linear_kernel_naive(input, weight, bias, output, batch_seq, in_features, out_features);
 }
 
 inline void element_wise_add_kernel(const float* a, const float* b, float* r, size_t n) {
