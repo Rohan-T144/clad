@@ -2,6 +2,9 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#ifdef OMP
+#include <omp.h>
+#endif
 
 #define CLAD_ASSERT(condition, message) assert((condition) && message)
 
@@ -68,6 +71,7 @@ inline void mat_vec_mul_kernel(const float* mat, const float* vec, float* result
 
 inline void mat_mul_kernel_naive(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
                                  size_t C2) {
+  #pragma omp parallel for
   for (size_t i = 0; i < R; ++i) {
     for (size_t j = 0; j < C2; ++j) {
       float sum = 0.0f;
@@ -82,6 +86,7 @@ static constexpr int UNROLL = 8;
 inline void mat_mul_kernel_unrolled(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
   // we assume R % UNROLL == 0 (fall back otherwise)
   size_t RT = R; // R = B*T for us
+  #pragma omp parallel for
   for (size_t r0 = 0; r0 < RT; r0 += UNROLL) {
     for (size_t j = 0; j < C2; ++j) {
       // roll UNROLL outputs into registers
@@ -137,6 +142,7 @@ inline void linear_kernel_naive(const float* input, const float* weight, const f
   // output: [batch_seq, out_features]
   // Computes: output = input @ weight.T + bias
   
+  #pragma omp parallel for
   for (size_t i = 0; i < batch_seq; ++i) {
     for (size_t j = 0; j < out_features; ++j) {
       float sum = bias[j]; // Start with bias
@@ -151,6 +157,7 @@ inline void linear_kernel_naive(const float* input, const float* weight, const f
 inline void linear_kernel_unrolled(const float* input, const float* weight, const float* bias, float* output,
                                    size_t batch_seq, size_t in_features, size_t out_features) {
   // Unrolled version for better performance when batch_seq % UNROLL == 0
+  #pragma omp parallel for
   for (size_t i0 = 0; i0 < batch_seq; i0 += UNROLL) {
     for (size_t j = 0; j < out_features; ++j) {
       // Initialize registers with bias
