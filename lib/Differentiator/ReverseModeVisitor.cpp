@@ -2657,6 +2657,11 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         isConstructInit && isNonAggrClass &&
         cast<CXXConstructExpr>(VD->getInit()->IgnoreImplicit())->getNumArgs() &&
         utils::isCopyable(VDType->getAsCXXRecordDecl());
+      
+    if (clad::utils::isCladTorchTensor(VD->getType())) {
+      isConstructInit = true;
+      shouldCopyInitialize = true;
+    }
 
     // Temporarily initialize the object with `*nullptr` to avoid
     // a potential error because of non-existing default constructor.

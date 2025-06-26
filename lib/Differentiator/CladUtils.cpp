@@ -1095,5 +1095,17 @@ namespace clad {
         return S.getASTContext().getLValueReferenceType(T);
       return T;
     }
+    
+    bool isCladTorchTensor(const clang::QualType T) {
+      if (const auto* CXXRD = T->getAsCXXRecordDecl()) {
+          if (CXXRD->getNameAsString() == "Tensor") {
+            if (const auto* NS = clang::dyn_cast<clang::NamespaceDecl>(CXXRD->getDeclContext())) {
+              return NS->getNameAsString() == "cladtorch";
+            }
+          }
+        }
+        return false;
+    }
+
   } // namespace utils
 } // namespace clad
