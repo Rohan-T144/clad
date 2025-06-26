@@ -1,117 +1,17 @@
 #ifndef CLAD_TENSOR_HPP_STATIC
 #define CLAD_TENSOR_HPP_STATIC
 
+#include "kernels.hpp"
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <cmath>
 #include <cstddef>
 #include <initializer_list>
-#include <iostream>
-#include <numeric>
-#include <string>
 #include <type_traits>
-#include <utility>
-#include <vector>
+
 #define CLAD_ASSERT(condition, message) assert((condition) && message)
 
 namespace cladtorch {
-
-// -------------------- Kernel Functions (Operating on raw pointers) --------------------
-namespace kernels {
-
-inline float gelu_kernel(float x) {
-  return 0.5f * x * (1.0f + std::tanh(std::sqrt(2.0f / M_PI) * (x + 0.044715f * x * x * x)));
-}
-
-inline void softmax_kernel(const float* logits, float* probs, int size) {
-  if (size <= 0)
-    return;
-  float max_logit = logits[0];
-  for (int i = 1; i < size; ++i)
-    if (logits[i] > max_logit)
-      max_logit = logits[i];
-
-  float sum_exp = 0.0f;
-  for (int i = 0; i < size; ++i) {
-    probs[i] = std::exp(logits[i] - max_logit);
-    sum_exp += probs[i];
-  }
-
-  if (sum_exp == 0.0f)
-    sum_exp = 1e-9f;
-  for (int i = 0; i < size; ++i)
-    probs[i] /= sum_exp;
-}
-
-inline float cross_entropy_loss_kernel(const float* probs, int target_class, int size) {
-  if (target_class < 0 || target_class >= size)
-    return -std::log(1e-9f);
-  float prob_at_target = probs[target_class];
-  return -std::log(std::max(prob_at_target, 1e-9f));
-}
-
-inline void mat_vec_mul_kernel(const float* mat, const float* vec, float* result, int rows, int cols) {
-  for (int i = 0; i < rows; ++i) {
-    result[i] = 0.0f;
-    for (int j = 0; j < cols; ++j)
-      result[i] += mat[i * cols + j] * vec[j];
-  }
-}
-
-// --- Matrix Multiplication Kernel ---
-inline void mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
-                           size_t C2) {
-  for (size_t i = 0; i < R; ++i) {
-    for (size_t j = 0; j < C2; ++j) {
-      float sum = 0.0f;
-      for (size_t k = 0; k < C1; ++k)
-        sum += a_data[i * C1 + k] * b_data[k * C2 + j];
-      result_data[i * C2 + j] = sum;
-    }
-  }
-}
-
-// --- Batched Matrix Multiplication Kernel ---
-inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, 
-                                   size_t batch_size, size_t R, size_t C1, size_t C2) {
-  size_t a_batch_stride = R * C1;
-  size_t b_batch_stride = C1 * C2;
-  size_t result_batch_stride = R * C2;
-  
-  for (size_t batch = 0; batch < batch_size; ++batch) {
-    const float* a_batch = a_data + batch * a_batch_stride;
-    const float* b_batch = b_data + batch * b_batch_stride;
-    float* result_batch = result_data + batch * result_batch_stride;
-    
-    mat_mul_kernel(a_batch, b_batch, result_batch, R, C1, C2);
-  }
-}
-
-// --- Element-wise and Scalar Kernels ---
-inline void element_wise_add_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] + b[i];
-}
-inline void element_wise_sub_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] - b[i];
-}
-inline void element_wise_mul_kernel(const float* a, const float* b, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = a[i] * b[i];
-}
-inline void scalar_mul_kernel(const float* in, float s, float* r, size_t n) {
-  for (size_t i = 0; i < n; ++i)
-    r[i] = in[i] * s;
-}
-inline void scalar_div_kernel(const float* in, float s, float* r, size_t n) {
-  CLAD_ASSERT(s != 0.0f, "Div by zero");
-  for (size_t i = 0; i < n; ++i)
-    r[i] = in[i] / s;
-}
-
-} // namespace kernels
 
 // -------------------- Compile-Time Tensor Class --------------------
 template <typename T, size_t... Dims> class Tensor {
@@ -168,7 +68,7 @@ public:
     if (this != &other) {
       if (!_data)
         _data = new T[NumElements];
-      std::copy(other._data, other._data + NumElements, _data);
+        std::copy(other._data, other._data + NumElements, _data);
     }
     return *this;
   }
@@ -183,21 +83,20 @@ public:
   }
 
   // --- Accessors & Utilities ---
-  // (at, scalar, fill, print, etc. remain the same)
   template <typename... IdxTypes> T& at(IdxTypes... idx_values);             // Declaration
   template <typename... IdxTypes> const T& at(IdxTypes... idx_values) const; // Declaration
   void print(const std::string& title = "") const;                           // Declaration
-  
+
   // Convenience for scalar tensors
   T& scalar() {
     static_assert(NDim == 0, "scalar() method is only for 0-dimension (scalar) tensors.");
-    CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor via scalar().");
+    // CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor via scalar().");
     return _data[0];
   }
 
   const T& scalar() const {
     static_assert(NDim == 0, "scalar() method is only for 0-dimension (scalar) tensors.");
-    CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor via scalar() const.");
+    // CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor via scalar() const.");
     return _data[0];
   }
 
@@ -208,23 +107,97 @@ public:
       std::fill(_data, _data + NumElements, value);
     }
   }
-  
+
+  // Data access
+  T* data() { return _data; }
+  const T* data() const { return _data; }
+
+  // Shape utilities
+  static constexpr size_t ndim() { return NDim; }
+  static constexpr size_t num_elements() { return NumElements; }
+  template <size_t Dim> static constexpr size_t size() {
+    static_assert(Dim < NDim, "Dimension index out of bounds.");
+    return Shape[Dim];
+  }
+
+  // --- Tensor Operations ---
+
+  // Lookup operation (embedding/indexing)
+  template <size_t NumIndices, size_t... RestDims>
+  Tensor<T, NumIndices, RestDims...> lookup(const std::array<int, NumIndices>& indices) const {
+    static_assert(NDim >= 1, "Lookup requires at least 1 dimension.");
+    constexpr size_t first_dim = Shape[0];
+    constexpr size_t slice_size = NumElements / first_dim;
+
+    Tensor<T, NumIndices, RestDims...> result;
+    kernels::lookup_kernel(_data, indices.data(), result._data, NumIndices, first_dim, slice_size);
+    return result;
+  }
+
+  // Norm operation (LayerNorm)
+  Tensor<T, Dims...> norm() const {
+    static_assert(NDim >= 1, "Norm requires at least 1 dimension.");
+    constexpr size_t last_dim = Shape[NDim - 1];
+    constexpr size_t num_vectors = NumElements / last_dim;
+
+    Tensor<T, Dims...> result;
+    kernels::norm_kernel(_data, result._data, num_vectors, last_dim);
+    return result;
+  }
+
+  // View operation (slice along first dimension)
+  template <size_t NewFirstDim, size_t... RestDims> Tensor<T, NewFirstDim, RestDims...> view(size_t offset) const {
+    static_assert(NDim >= 1, "View requires at least 1 dimension.");
+    static_assert(NewFirstDim <= Shape[0], "New first dimension cannot exceed original.");
+
+    constexpr size_t slice_size = NumElements / Shape[0];
+    CLAD_ASSERT(offset + NewFirstDim <= Shape[0], "View offset out of bounds.");
+
+    Tensor<T, NewFirstDim, RestDims...> result;
+
+    // Simple copy for contiguous slice
+    const T* src_start = _data + offset * slice_size;
+    std::copy(src_start, src_start + result.NumElements, result._data);
+    return result;
+  }
+
+  // Transpose operation (simplified for 2D case)
+  // Tensor<T, Shape[1], Shape[0]> transpose() const {
+  //   static_assert(NDim == 2, "Transpose currently only supports 2D tensors.");
+
+  //   Tensor<T, Shape[1], Shape[0]> result;
+
+  //   for (size_t i = 0; i < Shape[0]; ++i)
+  //     for (size_t j = 0; j < Shape[1]; ++j)
+  //       result._data[j * Shape[0] + i] = _data[i * Shape[1] + j];
+  //   return result;
+  // }
+
   // --- Operator Overloads ---
   Tensor& operator+=(const Tensor& other) {
     kernels::element_wise_add_kernel(_data, other._data, _data, NumElements);
     return *this;
   }
   Tensor operator+(const Tensor& other) const { return Tensor(*this) += other; }
+
   Tensor& operator-=(const Tensor& other) {
     kernels::element_wise_sub_kernel(_data, other._data, _data, NumElements);
     return *this;
   }
   Tensor operator-(const Tensor& other) const { return Tensor(*this) -= other; }
+
+  Tensor& operator*=(const Tensor& other) {
+    kernels::element_wise_mul_kernel(_data, other._data, _data, NumElements);
+    return *this;
+  }
+  Tensor operator*(const Tensor& other) const { return Tensor(*this) *= other; }
+
   Tensor& operator*=(T scalar) {
     kernels::scalar_mul_kernel(_data, scalar, _data, NumElements);
     return *this;
   }
   Tensor operator*(T scalar) const { return Tensor(*this) *= scalar; }
+
   Tensor& operator/=(T scalar) {
     kernels::scalar_div_kernel(_data, scalar, _data, NumElements);
     return *this;
@@ -232,7 +205,7 @@ public:
   Tensor operator/(T scalar) const { return Tensor(*this) /= scalar; }
 };
 
-// Implementations for at() and print() outside class body for brevity
+// Implementations for at() and print() outside class body
 template <typename T, size_t... Dims>
 template <typename... IdxTypes>
 T& Tensor<T, Dims...>::at(IdxTypes... idx_values) {
@@ -247,6 +220,7 @@ T& Tensor<T, Dims...>::at(IdxTypes... idx_values) {
     return _data[flat_index];
   }
 }
+
 template <typename T, size_t... Dims>
 template <typename... IdxTypes>
 const T& Tensor<T, Dims...>::at(IdxTypes... idx_values) const {
@@ -288,7 +262,6 @@ void Tensor<T, Dims...>::print(const std::string& title) const { /* Full impleme
     std::cout << "]\n";
   }
 }
-
 // -------------------- Tensor Operations (Wrappers around Kernels) --------------------
 
 // --- Matrix Multiplication (mat1 @ mat2) ---
@@ -301,8 +274,7 @@ Tensor<T, R, C2> matmul(const Tensor<T, R, C1>& a, const Tensor<T, C1, C2>& b) {
 }
 
 // Matrix-vector multiplication (2D x 1D -> 1D)
-template <typename T, size_t R, size_t C>
-Tensor<T, R> matmul(const Tensor<T, R, C>& mat, const Tensor<T, C>& vec) {
+template <typename T, size_t R, size_t C> Tensor<T, R> matmul(const Tensor<T, R, C>& mat, const Tensor<T, C>& vec) {
   Tensor<T, R> result;
   kernels::mat_vec_mul_kernel(mat._data, vec._data, result._data, R, C);
   return result;
@@ -316,27 +288,51 @@ Tensor<T, B, R, C2> matmul(const Tensor<T, B, R, C1>& a, const Tensor<T, B, C1, 
   return result;
 }
 
+// --- Linear Layer (Fused Matrix Multiplication + Bias) ---
+template <typename T, size_t BatchSeq, size_t InFeatures, size_t OutFeatures>
+Tensor<T, BatchSeq, OutFeatures> linear(const Tensor<T, BatchSeq, InFeatures>& input,
+                                        const Tensor<T, OutFeatures, InFeatures>& weight,
+                                        const Tensor<T, OutFeatures>& bias) {
+  Tensor<T, BatchSeq, OutFeatures> result;
+  kernels::linear_kernel(input._data, weight._data, bias._data, result._data, BatchSeq, InFeatures, OutFeatures);
+  return result;
+}
+
 // --- Softmax (applied to the last dimension) ---
 template <typename T, size_t... Dims> Tensor<T, Dims...> softmax(const Tensor<T, Dims...>& input) {
   static_assert(sizeof...(Dims) > 0, "Softmax requires at least one dimension.");
   Tensor<T, Dims...> result;
 
-  // Get the size of the last dimension using a fold expression
   constexpr size_t LastDim = (std::get<sizeof...(Dims) - 1>(std::make_tuple(Dims...)));
-  // Number of vectors to apply softmax to
   constexpr size_t NumVectors = Tensor<T, Dims...>::NumElements / LastDim;
 
   for (size_t i = 0; i < NumVectors; ++i) {
     const T* logits_slice = input._data + i * LastDim;
     T* probs_slice = result._data + i * LastDim;
-    kernels::softmax_kernel(logits_slice, probs_slice, LastDim);
+    kernels::softmax_kernel(logits_slice, probs_slice, LastDim, LastDim, LastDim);
   }
   return result;
 }
 
+// Causal softmax with masking
+template <typename T, size_t... Dims>
+Tensor<T, Dims...> causal_softmax(const Tensor<T, Dims...>& input, size_t end_pos) {
+  static_assert(sizeof...(Dims) > 0, "Causal softmax requires at least one dimension.");
+  Tensor<T, Dims...> result;
+
+  constexpr size_t LastDim = (std::get<sizeof...(Dims) - 1>(std::make_tuple(Dims...)));
+  constexpr size_t NumVectors = Tensor<T, Dims...>::NumElements / LastDim;
+
+  for (size_t i = 0; i < NumVectors; ++i) {
+    const T* logits_slice = input._data + i * LastDim;
+    T* probs_slice = result._data + i * LastDim;
+    kernels::softmax_kernel(logits_slice, probs_slice, LastDim, end_pos, LastDim);
+  }
+  return result;
+}
+
+// --- Cross Entropy Loss ---
 // Calculates the mean loss over a batch of predictions.
-// Probs: A tensor of probability distributions, e.g., shape (BatchSize, NumClasses).
-// Targets: A standard array of correct class indices for the batch.
 template <typename T, size_t BatchSize, size_t NumClasses>
 Tensor<T> cross_entropy_loss(const Tensor<T, BatchSize, NumClasses>& probs, const std::array<int, BatchSize>& targets) {
   float total_loss = 0.0f;
@@ -344,7 +340,6 @@ Tensor<T> cross_entropy_loss(const Tensor<T, BatchSize, NumClasses>& probs, cons
     const T* prob_slice = probs._data + i * NumClasses;
     total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets[i], NumClasses);
   }
-  // Return the mean loss as a scalar tensor
   return Tensor<T>(total_loss / BatchSize);
 }
 
@@ -355,12 +350,22 @@ Tensor<T> cross_entropy_loss(const Tensor<T, NumClasses>& probs, int target_clas
   return Tensor<T>(loss_val);
 }
 
-template <typename T, size_t... Dims> Tensor<T, Dims...> gelu(const Tensor<T, Dims...>& in) {
-  Tensor<T, Dims...> r;
-  for (size_t i = 0; i < in.NumElements; ++i)
-    r._data[i] = kernels::gelu_kernel(in._data[i]);
-  return r;
+// --- GELU Activation ---
+template <typename T, size_t... Dims> Tensor<T, Dims...> gelu(const Tensor<T, Dims...>& input) {
+  Tensor<T, Dims...> result;
+  for (size_t i = 0; i < input.NumElements; ++i)
+    result._data[i] = kernels::gelu_kernel(input._data[i]);
+  return result;
 }
+
+// --- Utility Functions ---
+template <typename T, size_t... Dims> Tensor<T, Dims...> norm(const Tensor<T, Dims...>& tensor) {
+  return tensor.norm();
+}
+
+// template <typename T, size_t R, size_t C> Tensor<T, C, R> transpose(const Tensor<T, R, C>& tensor) {
+//   return tensor.transpose();
+// }
 
 } // namespace cladtorch
 
