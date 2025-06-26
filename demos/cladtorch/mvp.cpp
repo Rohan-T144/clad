@@ -6,16 +6,17 @@ using namespace cladtorch;
 using FTensor = Tensor<float>;
 
 struct layer {
-  // FTensor weight;
+  FTensor weight;
   FTensor bias;
 
   layer(int in_features, int out_features) {
-    // weight = FTensor({out_features, in_features}, 0.1f);
+    weight = FTensor({out_features, in_features}, 0.1f);
     bias = FTensor({out_features}, 0.3f);
   }
 
   FTensor forward(const FTensor &input) const {
-    auto res = input + bias;
+    auto out = matmul(weight, input);
+    auto res = out + bias;
     auto res2 = gelu(res);
     return res2;
   }

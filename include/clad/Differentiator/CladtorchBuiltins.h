@@ -21,6 +21,127 @@ template <typename T> void zero_init(cladtorch::Tensor<T>& tensor) {
 // This is a placeholder; actual implementation may vary
 // }
 namespace custom_derivatives {
+namespace cladtorch {
+// template <typename T>
+// void gelu_pullback(const ::cladtorch::Tensor<T> &in, ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T> *_d_in) {
+//   // GELU derivative: dGELU(x) = GELU(x) + x * (1 - GELU(x)^2) * 0.5
+//   // where GELU(x) = x * 0.5 * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3)))
+
+//   // Compute GELU value
+//   auto gelu_val = ::cladtorch::gelu(in);
+
+//   // Compute derivative
+//   auto d_gelu = gelu_val;
+//   // auto d_gelu = gelu_val + in * (((gelu_val * -1) + 1.0f) * gelu_val) * 0.5f;
+
+//   // Apply the gradient
+//   *_d_in += _d_y * d_gelu;
+// }
+
+// Matrix multiplication pullback
+template <typename T>
+void matmul_pullback(const ::cladtorch::Tensor<T>& a, const ::cladtorch::Tensor<T>& b, ::cladtorch::Tensor<T> _d_y,
+                     ::cladtorch::Tensor<T>* _d_a, ::cladtorch::Tensor<T>* _d_b) {
+  // For C = matmul(A, B), the gradients are:
+  // dA = matmul(dC, B^T)
+  // dB = matmul(A^T, dC)
+
+  // Handle different cases based on tensor dimensions
+  if (a.ndim() == 2 && b.ndim() == 2) {
+    // Case: 2D x 2D matrix multiplication
+    // A: (R, C1), B: (C1, C2), C: (R, C2)
+    // dA = matmul(dC, B^T) -> (R, C2) x (C2, C1) = (R, C1)
+    // dB = matmul(A^T, dC) -> (C1, R) x (R, C2) = (C1, C2)
+    auto b_transposed = b.transpose(0, 1);
+    auto a_transposed = a.transpose(0, 1);
+
+    auto grad_a = ::cladtorch::matmul(_d_y, b_transposed);
+    auto grad_b = ::cladtorch::matmul(a_transposed, _d_y);
+
+    *_d_a += grad_a;
+    *_d_b += grad_b;
+  } else if (a.ndim() == 3 && b.ndim() == 2) {
+    // Case: 3D x 2D batched matrix multiplication
+    // A: (B, T, C), B: (C, out_features), C: (B, T, out_features)
+    // dA = matmul(dC, B^T) -> (B, T, out_features) x (out_features, C) = (B, T, C)
+    // dB = matmul(A^T, dC) -> sum over batch of (C, T) x (T, out_features) = (C, out_features)
+
+    auto b_transposed = b.transpose(0, 1);
+    auto grad_a = ::cladtorch::matmul(_d_y, b_transposed);
+    *_d_a += grad_a;
+
+    // For dB, we need to sum contributions from all batch elements
+    // Reshape A from (B, T, C) to (B*T, C), then transpose to (C, B*T)
+    int batch_size = a.size(0), seq_len = a.size(1), channels = a.size(2);
+    auto a_reshaped = a.reshape({batch_size * seq_len, channels});
+    auto a_reshaped_transposed = a_reshaped.transpose(0, 1);
+
+    // Reshape dC from (B, T, out_features) to (B*T, out_features)
+    auto dy_reshaped = _d_y.reshape({batch_size * seq_len, _d_y.size(2)});
+
+    auto grad_b = ::cladtorch::matmul(a_reshaped_transposed, dy_reshaped);
+    *_d_b += grad_b;
+  } else if (a.ndim() == 3 && b.ndim() == 3) {
+    // Case: 3D x 3D batched matrix multiplication
+    // A: (B, R, C1), B: (B, C1, C2), C: (B, R, C2)
+
+    int B = a.size(0);
+    for (int batch = 0; batch < B; ++batch) {
+      // Extract batch slices - this is a simplified approach
+      // In practice, you might want to implement batch-aware transpose and matmul
+      // For now, we'll handle this case similarly to 2D but for each batch
+
+      // This is a placeholder - a full implementation would need proper batch slicing
+      // For now, we'll use the same logic as 2D case
+      auto b_transposed = b.transpose(1, 2);
+      auto a_transposed = a.transpose(1, 2);
+
+      auto grad_a = ::cladtorch::matmul(_d_y, b_transposed);
+      auto grad_b = ::cladtorch::matmul(a_transposed, _d_y);
+
+      *_d_a += grad_a;
+      *_d_b += grad_b;
+    }
+  } else if (a.ndim() == 4 && b.ndim() == 4) {
+    // Case: 4D x 4D multi-head attention matmul
+    // A: (B, H, T1, d), B: (B, H, d, T2), C: (B, H, T1, T2)
+
+    // For 4D case, handle batch and head dimensions
+
+    // For each batch and head, compute gradients
+    // This is a simplified approach - a full implementation would be more efficient
+    auto b_transposed = b.transpose(2, 3); // Transpose last two dimensions
+    auto a_transposed = a.transpose(2, 3); // Transpose last two dimensions
+
+    auto grad_a = ::cladtorch::matmul(_d_y, b_transposed);
+    auto grad_b = ::cladtorch::matmul(a_transposed, _d_y);
+
+    *_d_a += grad_a;
+    *_d_b += grad_b;
+  } else if (a.ndim() == 2 && b.ndim() == 1) {
+    // Case: 2D x 1D matrix-vector multiplication
+    // A: (R, C), B: (C,), C: (R,)
+    // dA = outer_product(dC, B) -> (R,) outer (C,) = (R, C)
+    // dB = matmul(A^T, dC) -> (C, R) x (R,) = (C,)
+
+    // For dA: outer product of _d_y and b
+    auto grad_a = ::cladtorch::Tensor<T>({a.size(0), a.size(1)});
+    for (int r = 0; r < a.size(0); ++r)
+      for (int c = 0; c < a.size(1); ++c)
+        grad_a.at(r, c) = _d_y.at(r) * b.at(c);
+    *_d_a += grad_a;
+
+    // For dB: A^T * _d_y
+    auto a_transposed = a.transpose(0, 1);
+    auto grad_b = ::cladtorch::matmul(a_transposed, _d_y);
+    *_d_b += grad_b;
+  } else {
+    // Unsupported case - should not happen if matmul worked
+    assert(false && "Unsupported tensor dimensions for matmul pullback");
+  }
+}
+
+} // namespace cladtorch
 namespace class_functions {
 
 // Custom derivatives for cladtorch Tensor operations
@@ -41,38 +162,43 @@ namespace class_functions {
 //   return *this;
 // }
 
-void operator_plus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other, ::cladtorch::Tensor<float> _d_y,
-                                  ::cladtorch::Tensor<float>* _d_this, ::cladtorch::Tensor<float>* _d_other) {
+void operator_plus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                                  ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                                  ::cladtorch::Tensor<float>* _d_other) {
   // For +=, _d_y flows to _d_this
   *_d_this += _d_y;
-    *_d_other += _d_y;
-
+  *_d_other += _d_y;
 }
 
-void operator_plus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float> &other, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_this, ::cladtorch::Tensor<float> *_d_other) {
+void operator_plus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                            ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                            ::cladtorch::Tensor<float>* _d_other) {
   // For +, gradient flows to both operands
   *_d_this += _d_y;
-    *_d_other += _d_y;
-
+  *_d_other += _d_y;
 }
 
 // Subtraction operators
-void operator_minus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other, ::cladtorch::Tensor<float> _d_y,
-                                   ::cladtorch::Tensor<float>* _d_this, ::cladtorch::Tensor<float>* _d_other) {
+void operator_minus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                                   ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                                   ::cladtorch::Tensor<float>* _d_other) {
   // For -=, _d_y flows to _d_this
   *_d_this += _d_y;
   *_d_other -= _d_y; // Negate gradient for _d_other
 }
 
-void operator_minus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float> &other, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_this, ::cladtorch::Tensor<float> *_d_other) {
+void operator_minus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                             ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                             ::cladtorch::Tensor<float>* _d_other) {
   // For -, gradient flows to first operand as-is
   *_d_this += _d_y;
   *_d_other -= _d_y; // Negate gradient for second operand
 }
 
-// Multiplication operators  
-void operator_star_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other, ::cladtorch::Tensor<float> _d_y,
-                                      ::cladtorch::Tensor<float>* _d_this, ::cladtorch::Tensor<float>* _d_other) {
+// Multiplication operators
+void operator_star_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                                  ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                                  ::cladtorch::Tensor<float>* _d_other) {
   // For *=, d_this += d_y * other
   auto grad_this = _d_y * other;
   *_d_this += grad_this;
@@ -87,47 +213,48 @@ void operator_star_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cla
   // *_d_other += grad_other;
 }
 
-void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float> &other, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_this, ::cladtorch::Tensor<float> *_d_other) {
+void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
+                            ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
+                            ::cladtorch::Tensor<float>* _d_other) {
   // For *, d_this += d_y * other
   auto grad_this = _d_y * other;
   *_d_this += grad_this;
-  
-  // For d_other, gradient is d_y * _this  
+
+  // For d_other, gradient is d_y * _this
   auto grad_other = _d_y * (*_this);
   *_d_other += grad_other;
 }
 
 // Scalar multiplication operators
 void operator_star_equal_pullback(::cladtorch::Tensor<float>* _this, float scalar, ::cladtorch::Tensor<float> _d_y,
-                                      ::cladtorch::Tensor<float>* _d_this, float* _d_scalar) {
+                                  ::cladtorch::Tensor<float>* _d_this, float* _d_scalar) {
   // For tensor *= scalar
   auto grad_this = _d_y * scalar;
   *_d_this += grad_this;
-  
+
   // For scalar gradient, sum all elements of (_d_y * original_this)
   auto current_this = *_this;
-  auto original_this = current_this / scalar;  // Reconstruct original value
+  auto original_this = current_this / scalar; // Reconstruct original value
   auto grad_scalar_tensor = _d_y * original_this;
-  
+
   float grad_scalar_sum = 0;
-  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i) {
+  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i)
     grad_scalar_sum += grad_scalar_tensor.data()[i];
-  }
   *_d_scalar += grad_scalar_sum;
 }
 
-void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, float scalar, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_this, float *_d_scalar) {
+void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, float scalar, ::cladtorch::Tensor<float> _d_y,
+                            ::cladtorch::Tensor<float>* _d_this, float* _d_scalar) {
   // For tensor * scalar
   auto grad_this = _d_y * scalar;
   *_d_this += grad_this;
-  
+
   // For scalar gradient, sum all elements of (_d_y * _this)
   auto grad_scalar_tensor = _d_y * (*_this);
-  
+
   float grad_scalar_sum = 0;
-  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i) {
+  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i)
     grad_scalar_sum += grad_scalar_tensor.data()[i];
-  }
   *_d_scalar += grad_scalar_sum;
 }
 
@@ -137,35 +264,32 @@ void operator_divide_equal_pullback(::cladtorch::Tensor<float>* _this, float sca
   // For tensor /= scalar
   auto grad_this = _d_y / scalar;
   *_d_this += grad_this;
-  
+
   // For scalar gradient: d_scalar = -sum(_d_y * original_this) / (scalar^2)
   auto current_this = *_this;
-  auto original_this = current_this * scalar;  // Reconstruct original value
+  auto original_this = current_this * scalar; // Reconstruct original value
   auto grad_scalar_tensor = _d_y * original_this;
-  
+
   float grad_scalar_sum = 0;
-  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i) {
+  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i)
     grad_scalar_sum += grad_scalar_tensor.data()[i];
-  }
   *_d_scalar += -grad_scalar_sum / (scalar * scalar);
 }
 
-void operator_divide_pullback(const ::cladtorch::Tensor<float>* _this, float scalar, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_this, float *_d_scalar) {
+void operator_divide_pullback(const ::cladtorch::Tensor<float>* _this, float scalar, ::cladtorch::Tensor<float> _d_y,
+                              ::cladtorch::Tensor<float>* _d_this, float* _d_scalar) {
   // For tensor / scalar
   auto grad_this = _d_y / scalar;
   *_d_this += grad_this;
-  
+
   // For scalar gradient: d_scalar = -sum(_d_y * _this) / (scalar^2)
   auto grad_scalar_tensor = _d_y * (*_this);
-  
+
   float grad_scalar_sum = 0;
-  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i) {
+  for (int i = 0; i < grad_scalar_tensor.num_elements(); ++i)
     grad_scalar_sum += grad_scalar_tensor.data()[i];
-  }
   *_d_scalar += -grad_scalar_sum / (scalar * scalar);
 }
-
-
 
 template <typename T>
 clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
@@ -208,8 +332,8 @@ constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const
 template <typename T>
 void constructor_pullback(const ::cladtorch::Tensor<T>& other, ::cladtorch::Tensor<T>* _d_this,
                           ::cladtorch::Tensor<T>* _d_other) {
-  *_d_other += *_d_this; // Assuming we want to accumulate the adjoint
-  _d_this->fill(0);      // Assuming we want to zero out the adjoint for this tensor
+  *_d_other += *_d_this;
+  _d_this->fill(0);
 }
 } // namespace class_functions
 } // namespace custom_derivatives
