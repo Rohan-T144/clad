@@ -474,7 +474,9 @@ public:
   Tensor operator+(const Tensor& other) const {
     if (_shape == other._shape) {
       // Same shape, use optimized path
-      return Tensor(*this) += other;
+      Tensor<T> result(*this);
+      kernels::element_wise_add_kernel(_data, other._data, result._data, _num_elements);
+      return result;
     } else {
       // Different shapes, need broadcasting
       std::vector<int> result_shape = broadcast_shape(*this, other);
@@ -739,9 +741,9 @@ template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, int t
 }
 
 template <typename T> Tensor<T> gelu(const Tensor<T>& in) {
-  Tensor<T> r(in.shape());
+  Tensor<T> r(in);
   for (int i = 0; i < in.num_elements(); ++i)
-    r.data()[i] = kernels::gelu_kernel(in.data()[i]);
+    r._data[i] = kernels::gelu_kernel(in._data[i]);
   return r;
 }
 

@@ -14,7 +14,8 @@
 // how the Tensor class manages its data.
 namespace cladtorch::kernels {
 inline float gelu_kernel(float x) {
-  return 0.5f * x * (1.0f + std::tanh(std::sqrt(2.0f / M_PI) * (x + 0.044715f * x * x * x)));
+  constexpr float sqrt_2_over_pi = 0.7978845608028654f; // sqrt(2 / pi)
+  return 0.5f * x * (1.0f + std::tanh(sqrt_2_over_pi * (x + 0.044715f * x * x * x)));
 }
 
 inline void softmax_kernel(const float* logits, float* probs, int size, int end, int vocab_size) {
