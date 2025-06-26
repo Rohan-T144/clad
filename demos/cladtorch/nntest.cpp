@@ -48,9 +48,10 @@ struct Layer2 {
   Layer2() : W({OUTPUT_SIZE, HIDDEN_SIZE}), b({OUTPUT_SIZE}) {};
   // Forward pass for Layer 2
   FTensor forward(const FTensor& hidden) const { 
-    auto w = matmul(W, hidden);
-    auto bout = w + b; // Add bias
-    return bout;
+    // auto w = matmul(W, hidden);
+    // auto ret = w + b; // Add bias
+    auto ret = linear(hidden, W, b); // Linear layer: hidden @ W^T + b
+    return ret;
   }
   void update_weights(const Layer2& d_l, float learning_rate) {
     W -= d_l.W * learning_rate;
@@ -155,11 +156,12 @@ int main() {
   float learning_rate = 0.01f;
   
   cout << "Training the model...\n";
+  // for (int epoch = 0; epoch < 1; ++epoch) {
   for (int epoch = 0; epoch < 20; ++epoch) {
     float total_loss = 0.0f;
 
     // Training phase
-    // for (size_t i = 0; i < train_inputs.size(); ++i) {
+    // for (size_t i = 0; i < 2; ++i) {
     for (size_t i = 0; i < train_inputs.size(); ++i) {
       // std::cerr << "Training on input " << i + 1 << "/" << train_inputs.size() << endl;
       FTensor input({3}, train_inputs[i].data());

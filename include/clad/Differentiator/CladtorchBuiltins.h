@@ -236,6 +236,103 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, int target
   // *_d_target_class remains unchanged
 }
 
+// Linear kernel pullbacks
+namespace kernels {
+
+// Linear kernel naive pullback
+void linear_kernel_naive_pullback(const float* input, const float* weight, const float* bias, float* output,
+                                  size_t batch_seq, size_t in_features, size_t out_features,
+                                  const float* d_output,
+                                  float* d_input, float* d_weight, float* d_bias) {
+  // For linear: output = input @ weight.T + bias
+  // Gradients are:
+  // d_input[i, k] = sum_j(d_output[i, j] * weight[j, k])
+  // d_weight[j, k] = sum_i(d_output[i, j] * input[i, k])
+  // d_bias[j] = sum_i(d_output[i, j])
+  
+  #pragma omp parallel for
+  for (size_t i = 0; i < batch_seq; ++i) {
+    for (size_t k = 0; k < in_features; ++k) {
+      float grad_input = 0.0f;
+      for (size_t j = 0; j < out_features; ++j) {
+        grad_input += d_output[i * out_features + j] * weight[j * in_features + k];
+      }
+      d_input[i * in_features + k] += grad_input;
+    }
+  }
+  
+  #pragma omp parallel for
+  for (size_t j = 0; j < out_features; ++j) {
+    float grad_bias = 0.0f;
+    for (size_t i = 0; i < batch_seq; ++i) {
+      grad_bias += d_output[i * out_features + j];
+    }
+    d_bias[j] += grad_bias;
+    
+    for (size_t k = 0; k < in_features; ++k) {
+      float grad_weight = 0.0f;
+      for (size_t i = 0; i < batch_seq; ++i) {
+        grad_weight += d_output[i * out_features + j] * input[i * in_features + k];
+      }
+      d_weight[j * in_features + k] += grad_weight;
+    }
+  }
+}
+
+// Linear kernel unrolled pullback
+void linear_kernel_unrolled_pullback(const float* input, const float* weight, const float* bias, float* output,
+                                     size_t batch_seq, size_t in_features, size_t out_features,
+                                     const float* d_output,
+                                     float* d_input, float* d_weight, float* d_bias) {
+  // For efficiency, we'll delegate to the naive version for now
+  // A fully optimized unrolled version would be more complex
+  linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
+                               d_output, d_input, d_weight, d_bias);
+}
+
+// Linear kernel pullback dispatcher
+void linear_kernel_pullback(const float* input, const float* weight, const float* bias, float* output,
+                            size_t batch_seq, size_t in_features, size_t out_features,
+                            const float* d_output,
+                            float* d_input, float* d_weight, float* d_bias) {
+  // Dispatch to unrolled or regular kernel based on batch_seq
+  if (batch_seq % 8 == 0 && batch_seq >= 8)
+    linear_kernel_unrolled_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
+                                   d_output, d_input, d_weight, d_bias);
+  else
+    linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
+                                d_output, d_input, d_weight, d_bias);
+}
+
+} // namespace kernels
+
+// Linear function pullback
+template <typename T>
+void linear_pullback(const ::cladtorch::Tensor<T>& input, const ::cladtorch::Tensor<T>& weight, const ::cladtorch::Tensor<T>& bias,
+                     ::cladtorch::Tensor<T> _d_y,
+                     ::cladtorch::Tensor<T>* _d_input, ::cladtorch::Tensor<T>* _d_weight, ::cladtorch::Tensor<T>* _d_bias) {
+  static_assert(::std::is_same_v<T, float>, "Linear pullback currently only supports float tensors");
+
+  // Extract dimensions (same as forward pass)
+  const auto& input_shape = input.shape();
+  const auto& weight_shape = weight.shape();
+  const auto& bias_shape = bias.shape();
+  
+  const int in_features = input_shape[input.ndim() - 1];
+  const int out_features = weight_shape[0];
+  const int batch_seq = input.num_elements() / in_features;
+  
+  // Call the kernel pullback
+  kernels::linear_kernel_pullback(
+    input.data(), weight.data(), bias.data(), nullptr, // output not needed for pullback
+    static_cast<size_t>(batch_seq),
+    static_cast<size_t>(in_features),
+    static_cast<size_t>(out_features),
+    _d_y.data(),
+    _d_input->data(), _d_weight->data(), _d_bias->data()
+  );
+}
+
 } // namespace cladtorch
 namespace class_functions {
 

@@ -747,21 +747,21 @@ template <typename T> Tensor<T> gelu(const Tensor<T>& in) {
   return r;
 }
 
-template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) { return src.lookup(indices); }
+// template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) { return src.lookup(indices); }
 
 template <typename T> Tensor<T> norm(const Tensor<T>& input) { return input.norm(); }
 
-template <typename T> std::vector<Tensor<T>> split(const Tensor<T>& input, int size, int axis) {
-  return input.split(size, axis);
-}
+// template <typename T> std::vector<Tensor<T>> split(const Tensor<T>& input, int size, int axis) {
+//   return input.split(size, axis);
+// }
 
-template <typename T> Tensor<T> transpose(const Tensor<T>& input, int dim0, int dim1) {
-  return input.transpose(dim0, dim1);
-}
+// template <typename T> Tensor<T> transpose(const Tensor<T>& input, int dim0, int dim1) {
+//   return input.transpose(dim0, dim1);
+// }
 
-template <typename T> Tensor<T> broadcast_to(const Tensor<T>& input, const std::vector<int>& target_shape) {
-  return input.broadcast_to(target_shape);
-}
+// template <typename T> Tensor<T> broadcast_to(const Tensor<T>& input, const std::vector<int>& target_shape) {
+//   return input.broadcast_to(target_shape);
+// }
 
 // Optimized linear layer function: input @ weight.T + bias
 template <typename T> 
@@ -769,7 +769,7 @@ Tensor<T> linear(const Tensor<T>& input, const Tensor<T>& weight, const Tensor<T
   static_assert(std::is_same_v<T, float>, "Linear operation currently only supports float tensors");
   
   // Validate input shapes
-  CLAD_ASSERT(input.ndim() >= 2, "Input must have at least 2 dimensions");
+  CLAD_ASSERT(input.ndim() >= 1, "Input must have at least 2 dimensions");
   CLAD_ASSERT(weight.ndim() == 2, "Weight must be 2-dimensional");
   CLAD_ASSERT(bias.ndim() == 1, "Bias must be 1-dimensional");
   

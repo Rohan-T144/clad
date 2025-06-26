@@ -48,6 +48,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <clang/AST/Decl.h>
 #include <cstddef>
 #include <iterator>
 #include <numeric>
@@ -396,9 +397,27 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
           continue;
         }
         auto VDDerivedType = utils::getNonConstType(paramTy, m_Sema);
+        Expr* initExpr = nullptr;
+        bool isDirectInit = false;
+        if (clad::utils::isCladTorchTensor(VDDerivedType)) {
+          // param->Arg
+          ParmVarDecl* newFuncParam = nullptr;
+          for (auto* p : m_Derivative->parameters()) {
+              if (p->getName() == param->getName()) {
+                  newFuncParam = p;
+                  break;
+              }
+          }
+          assert(newFuncParam && "Could not find corresponding parameter in derivative function");
+          initExpr = BuildDeclRef(newFuncParam->getDefinition());
+          isDirectInit = true;
+        } else {
+          // If the type is not a tensor, we can use zero initialization.
+          initExpr = getZeroInit(VDDerivedType);
+        }
         auto* VDDerived =
             BuildGlobalVarDecl(VDDerivedType, "_d_" + param->getNameAsString(),
-                               getZeroInit(VDDerivedType));
+                               initExpr, isDirectInit);
         m_Variables[param] = BuildDeclRef(VDDerived);
         addToBlock(BuildDeclStmt(VDDerived), m_Globals);
       }
