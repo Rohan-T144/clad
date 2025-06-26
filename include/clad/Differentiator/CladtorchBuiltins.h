@@ -5,10 +5,10 @@
 namespace clad {
 // specialize the zero_init function for Tensor
 template <typename T> void zero_init(cladtorch::Tensor<T>& tensor) {
-  std::cerr << "==========================================================================" << ::std::endl;
-  std::cerr << "Zero initializing tensor with shape: ";
-  tensor.print();
-  std::cerr << "==========================================================================" << ::std::endl;
+  // std::cerr << "==========================================================================" << ::std::endl;
+  // std::cerr << "Zero initializing tensor with shape: ";
+  // tensor.print();
+  // std::cerr << "==========================================================================" << ::std::endl;
   tensor.fill(0);
 }
 // template <typename T, size_t... Dims>
@@ -139,6 +139,101 @@ void matmul_pullback(const ::cladtorch::Tensor<T>& a, const ::cladtorch::Tensor<
     // Unsupported case - should not happen if matmul worked
     assert(false && "Unsupported tensor dimensions for matmul pullback");
   }
+}
+
+
+// Softmax pullback
+template <typename T>
+void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int vocab_size, ::cladtorch::Tensor<T> _d_y,
+                      ::cladtorch::Tensor<T>* _d_input, bool* _d_is_casual, int* _d_vocab_size) {
+  // For softmax, if y = softmax(x), then:
+  // dy/dx_i = y_i * (delta_ij - y_j) where delta_ij is Kronecker delta
+  // This can be written as: dy/dx = y * (grad_y - sum(grad_y * y))
+  
+  auto softmax_output = ::cladtorch::softmax(input, is_casual, vocab_size);
+  
+  // Compute sum(grad_y * y) along the last dimension
+  int last_dim = input.shape().back();
+  int num_vectors = input.num_elements() / last_dim;
+  
+  for (int vec = 0; vec < num_vectors; ++vec) {
+    T sum_grad_y_times_y = 0;
+    
+    // Calculate the sum for this vector
+    for (int i = 0; i < last_dim; ++i) {
+      int idx = vec * last_dim + i;
+      sum_grad_y_times_y += _d_y.data()[idx] * softmax_output.data()[idx];
+    }
+    
+    // Compute gradient for each element in this vector
+    for (int i = 0; i < last_dim; ++i) {
+      int idx = vec * last_dim + i;
+      T grad = softmax_output.data()[idx] * (_d_y.data()[idx] - sum_grad_y_times_y);
+      _d_input->data()[idx] += grad;
+    }
+  }
+  
+  // Gradients for bool and int parameters are typically zero for softmax
+  // *_d_is_casual remains unchanged (no contribution)
+  // *_d_vocab_size remains unchanged (no contribution)
+}
+
+// Cross entropy loss pullback for batched version
+template <typename T>
+void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::std::vector<int>& targets, ::cladtorch::Tensor<T> _d_y,
+                                 ::cladtorch::Tensor<T>* _d_probs, ::std::vector<int>* _d_targets) {
+  // For cross entropy loss L = -log(p_target), the gradient is:
+  // dL/dp_i = -1/p_target if i == target, 0 otherwise
+  // But since we typically use softmax + cross entropy, the combined gradient is:
+  // dL/dx_i = p_i - 1 if i == target, p_i otherwise
+  // However, here we only have probs, so: dL/dp_i = -1/p_target if i == target
+  
+  CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
+  int batch_size = probs.size(0);
+  int num_classes = probs.size(1);
+  
+  // _d_y is a scalar (the loss), so we need to broadcast its gradient
+  T loss_grad = _d_y.scalar(); // Extract scalar value
+  T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
+  
+  for (int batch = 0; batch < batch_size; ++batch) {
+    int target = targets[batch];
+    for (int cls = 0; cls < num_classes; ++cls) {
+      int idx = batch * num_classes + cls;
+      if (cls == target) {
+        // Gradient is -1/p_target for the target class
+        T prob_val = probs.data()[idx];
+        _d_probs->data()[idx] += avg_loss_grad * (-1.0f / prob_val);
+      }
+      // Gradient is 0 for non-target classes (no addition needed)
+    }
+  }
+  
+  // Targets don't have gradients in typical scenarios
+  // *_d_targets remains unchanged
+}
+
+// Cross entropy loss pullback for single instance version
+template <typename T>
+void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, int target_class, ::cladtorch::Tensor<T> _d_y,
+                                 ::cladtorch::Tensor<T>* _d_probs, int* _d_target_class) {
+  // For single instance cross entropy loss
+  CLAD_ASSERT(probs.ndim() == 1, "Probs tensor must be 1D for single cross entropy loss.");
+  int num_classes = probs.num_elements();
+  
+  T loss_grad = _d_y.scalar(); // Extract scalar value
+  
+  for (int cls = 0; cls < num_classes; ++cls) {
+    if (cls == target_class) {
+      // Gradient is -1/p_target for the target class
+      T prob_val = probs.data()[cls];
+      _d_probs->data()[cls] += loss_grad * (-1.0f / prob_val);
+    }
+    // Gradient is 0 for non-target classes (no addition needed)
+  }
+  
+  // Target class doesn't have gradients in typical scenarios
+  // *_d_target_class remains unchanged
 }
 
 } // namespace cladtorch
