@@ -555,6 +555,78 @@ void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Ten
       orig_slice[j] += grad_slice[j];
   }
 }
+
+template <typename T>
+void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<int>& new_shape,
+                      ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
+                      ::std::vector<int>* _d_new_shape) {
+  // new_shape doesn't have gradients since it's a shape specification
+  (void)_d_new_shape;
+  
+  // Reshape is just a reinterpretation of the same data, so we need to
+  // reshape the gradient back to the original shape and accumulate
+  // ::cladtorch::Tensor<T> reshaped_grad = ;
+  *_d_this += _d_y.reshape(_this->shape());
+}
+
+// TODO FIXME: Modify clad to copy-initialize vectors of tensors so that _d_y can be properly calculated
+template <typename T>
+void split_pullback(const ::cladtorch::Tensor<T>* _this, int size, int axis,
+                    ::std::vector<::cladtorch::Tensor<T>> _d_y,
+                    ::cladtorch::Tensor<T>* _d_this, int* _d_size, int* _d_axis) {
+  // size and axis don't have gradients since they are parameters
+  (void)_d_size;
+  (void)_d_axis;
+  
+  // Split creates multiple tensors from one, so the pullback needs to
+  // concatenate the gradients back along the split axis
+  int num_splits = _this->shape()[axis] / size;
+  
+  // For each split, accumulate gradients back to the appropriate slice
+  for (int i = 0; i < num_splits; ++i) {
+    if (i < (int)_d_y.size()) {
+      const ::cladtorch::Tensor<T>& split_grad = _d_y[i];
+      
+      // Calculate the offset for this split in the original tensor
+      int split_offset = i * size;
+      
+      // Calculate slice size for elements after the split axis
+      int slice_size = 1;
+      for (int dim = axis + 1; dim < _this->ndim(); ++dim)
+        slice_size *= _this->shape()[dim];
+      
+      // Calculate stride for the split axis
+      int axis_stride = 1;
+      for (int dim = axis + 1; dim < _this->ndim(); ++dim)
+        axis_stride *= _this->shape()[dim];
+      
+      // Copy gradients back to the original tensor
+      for (int elem = 0; elem < split_grad.num_elements(); ++elem) {
+        // Calculate multi-dimensional coordinates in the split tensor
+        ::std::vector<int> coords(split_grad.ndim());
+        int temp_idx = elem;
+        for (int dim = split_grad.ndim() - 1; dim >= 0; --dim) {
+          coords[dim] = temp_idx % split_grad.shape()[dim];
+          temp_idx /= split_grad.shape()[dim];
+        }
+        
+        // Adjust coordinate for the split axis
+        coords[axis] += split_offset;
+        
+        // Calculate flat index in the original tensor
+        int orig_idx = 0;
+        for (int dim = 0; dim < _this->ndim(); ++dim) {
+          int stride = 1;
+          for (int d = dim + 1; d < _this->ndim(); ++d)
+            stride *= _this->shape()[d];
+          orig_idx += coords[dim] * stride;
+        }
+        
+        _d_this->data()[orig_idx] += split_grad.data()[elem];
+      }
+    }
+  }
+}
 } // namespace class_functions
 } // namespace custom_derivatives
 } // namespace clad
