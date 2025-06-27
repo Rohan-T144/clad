@@ -46,12 +46,12 @@ struct Layer2 {
   FTensor W; // Weight matrix from hidden to output
   FTensor b;              // Bias vector
   // Default constructor, Tensor initialization happens automatically
-  Layer2() : W({OUTPUT_SIZE, HIDDEN_SIZE}), b({OUTPUT_SIZE}) {};
+  // Layer2() : W({OUTPUT_SIZE, HIDDEN_SIZE}), b({OUTPUT_SIZE}) {};
+  Layer2() : W({HIDDEN_SIZE, OUTPUT_SIZE}), b({OUTPUT_SIZE}) {};
   // Forward pass for Layer 2
   FTensor forward(const FTensor& hidden) const { 
-    // auto w = matmul(W, hidden);
-    // auto ret = w + b; // Add bias
-    auto ret = linear(hidden, W, b); // Linear layer: hidden @ W^T + b
+    auto wT = W.transpose(0, 1); // Transpose weight matrix for multiplication
+    auto ret = linear(hidden, wT, b); // Linear layer: hidden @ W^T + b
     return ret;
   }
   void update_weights(const Layer2& d_l, float learning_rate) {

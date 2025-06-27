@@ -728,7 +728,7 @@ template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& 
   int num_classes = probs.size(1);
   CLAD_ASSERT(batch_size == targets.num_elements(), "Batch size of probs and targets must match.");
 
-  float total_loss = 0.0f;
+  T total_loss = 0;
   for (int i = 0; i < batch_size; ++i) {
     const T* prob_slice = probs._data + i * num_classes;
     total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets.at(i), num_classes);
@@ -740,7 +740,7 @@ template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& 
 // Single-instance cross-entropy loss
 template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, int target_class) {
   CLAD_ASSERT(probs.ndim() == 1, "Probs tensor must be 1D for single cross entropy loss.");
-  float loss_val = kernels::cross_entropy_loss_kernel(probs.data(), target_class, probs.num_elements());
+  T loss_val = kernels::cross_entropy_loss_kernel(probs.data(), target_class, probs.num_elements());
   return Tensor<T>::new_scalar(loss_val); // Return loss as a scalar tensor
 }
 

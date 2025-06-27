@@ -141,7 +141,6 @@ void matmul_pullback(const ::cladtorch::Tensor<T>& a, const ::cladtorch::Tensor<
   }
 }
 
-
 // Softmax pullback
 template <typename T>
 void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int vocab_size, ::cladtorch::Tensor<T> _d_y,
@@ -149,22 +148,22 @@ void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int v
   // For softmax, if y = softmax(x), then:
   // dy/dx_i = y_i * (delta_ij - y_j) where delta_ij is Kronecker delta
   // This can be written as: dy/dx = y * (grad_y - sum(grad_y * y))
-  
+
   auto softmax_output = ::cladtorch::softmax(input, is_casual, vocab_size);
-  
+
   // Compute sum(grad_y * y) along the last dimension
   int last_dim = input.shape().back();
   int num_vectors = input.num_elements() / last_dim;
-  
+
   for (int vec = 0; vec < num_vectors; ++vec) {
     T sum_grad_y_times_y = 0;
-    
+
     // Calculate the sum for this vector
     for (int i = 0; i < last_dim; ++i) {
       int idx = vec * last_dim + i;
       sum_grad_y_times_y += _d_y.data()[idx] * softmax_output.data()[idx];
     }
-    
+
     // Compute gradient for each element in this vector
     for (int i = 0; i < last_dim; ++i) {
       int idx = vec * last_dim + i;
@@ -172,7 +171,7 @@ void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int v
       _d_input->data()[idx] += grad;
     }
   }
-  
+
   // Gradients for bool and int parameters are typically zero for softmax
   // *_d_is_casual remains unchanged (no contribution)
   // *_d_vocab_size remains unchanged (no contribution)
@@ -182,22 +181,23 @@ void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int v
 // template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const Tensor<U>& targets) {
 
 template <typename T, typename U>
-void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cladtorch::Tensor<U>& targets, ::cladtorch::Tensor<T> _d_y,
-                                 ::cladtorch::Tensor<T>* _d_probs, ::cladtorch::Tensor<U>* _d_targets) {
+void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cladtorch::Tensor<U>& targets,
+                                 ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_probs,
+                                 ::cladtorch::Tensor<U>* _d_targets) {
   // For cross entropy loss L = -log(p_target), the gradient is:
   // dL/dp_i = -1/p_target if i == target, 0 otherwise
   // But since we typically use softmax + cross entropy, the combined gradient is:
   // dL/dx_i = p_i - 1 if i == target, p_i otherwise
   // However, here we only have probs, so: dL/dp_i = -1/p_target if i == target
-  
+
   CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
   int batch_size = probs.size(0);
   int num_classes = probs.size(1);
-  
+
   // _d_y is a scalar (the loss), so we need to broadcast its gradient
-  T loss_grad = _d_y.scalar(); // Extract scalar value
+  T loss_grad = _d_y.scalar();              // Extract scalar value
   T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
-  
+
   for (int batch = 0; batch < batch_size; ++batch) {
     int target = targets.at(batch);
     for (int cls = 0; cls < num_classes; ++cls) {
@@ -210,7 +210,7 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cl
       // Gradient is 0 for non-target classes (no addition needed)
     }
   }
-  
+
   // Targets don't have gradients in typical scenarios
   // *_d_targets remains unchanged
 }
@@ -222,9 +222,9 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, int target
   // For single instance cross entropy loss
   CLAD_ASSERT(probs.ndim() == 1, "Probs tensor must be 1D for single cross entropy loss.");
   int num_classes = probs.num_elements();
-  
+
   T loss_grad = _d_y.scalar(); // Extract scalar value
-  
+
   for (int cls = 0; cls < num_classes; ++cls) {
     if (cls == target_class) {
       // Gradient is -1/p_target for the target class
@@ -233,7 +233,7 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, int target
     }
     // Gradient is 0 for non-target classes (no addition needed)
   }
-  
+
   // Target class doesn't have gradients in typical scenarios
   // *_d_target_class remains unchanged
 }
@@ -243,39 +243,35 @@ namespace kernels {
 
 // Linear kernel naive pullback
 void linear_kernel_naive_pullback(const float* input, const float* weight, const float* bias, float* output,
-                                  size_t batch_seq, size_t in_features, size_t out_features,
-                                  const float* d_output,
+                                  size_t batch_seq, size_t in_features, size_t out_features, const float* d_output,
                                   float* d_input, float* d_weight, float* d_bias) {
   // For linear: output = input @ weight.T + bias
   // Gradients are:
   // d_input[i, k] = sum_j(d_output[i, j] * weight[j, k])
   // d_weight[j, k] = sum_i(d_output[i, j] * input[i, k])
   // d_bias[j] = sum_i(d_output[i, j])
-  
-  #pragma omp parallel for
+
+#pragma omp parallel for
   for (size_t i = 0; i < batch_seq; ++i) {
     for (size_t k = 0; k < in_features; ++k) {
       float grad_input = 0.0f;
-      for (size_t j = 0; j < out_features; ++j) {
+      for (size_t j = 0; j < out_features; ++j)
         grad_input += d_output[i * out_features + j] * weight[j * in_features + k];
-      }
       d_input[i * in_features + k] += grad_input;
     }
   }
-  
-  #pragma omp parallel for
+
+#pragma omp parallel for
   for (size_t j = 0; j < out_features; ++j) {
     float grad_bias = 0.0f;
-    for (size_t i = 0; i < batch_seq; ++i) {
+    for (size_t i = 0; i < batch_seq; ++i)
       grad_bias += d_output[i * out_features + j];
-    }
     d_bias[j] += grad_bias;
-    
+
     for (size_t k = 0; k < in_features; ++k) {
       float grad_weight = 0.0f;
-      for (size_t i = 0; i < batch_seq; ++i) {
+      for (size_t i = 0; i < batch_seq; ++i)
         grad_weight += d_output[i * out_features + j] * input[i * in_features + k];
-      }
       d_weight[j * in_features + k] += grad_weight;
     }
   }
@@ -283,56 +279,50 @@ void linear_kernel_naive_pullback(const float* input, const float* weight, const
 
 // Linear kernel unrolled pullback
 void linear_kernel_unrolled_pullback(const float* input, const float* weight, const float* bias, float* output,
-                                     size_t batch_seq, size_t in_features, size_t out_features,
-                                     const float* d_output,
+                                     size_t batch_seq, size_t in_features, size_t out_features, const float* d_output,
                                      float* d_input, float* d_weight, float* d_bias) {
   // For efficiency, we'll delegate to the naive version for now
   // A fully optimized unrolled version would be more complex
-  linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
-                               d_output, d_input, d_weight, d_bias);
+  linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output, d_input,
+                               d_weight, d_bias);
 }
 
 // Linear kernel pullback dispatcher
-void linear_kernel_pullback(const float* input, const float* weight, const float* bias, float* output,
-                            size_t batch_seq, size_t in_features, size_t out_features,
-                            const float* d_output,
-                            float* d_input, float* d_weight, float* d_bias) {
+void linear_kernel_pullback(const float* input, const float* weight, const float* bias, float* output, size_t batch_seq,
+                            size_t in_features, size_t out_features, const float* d_output, float* d_input,
+                            float* d_weight, float* d_bias) {
   // Dispatch to unrolled or regular kernel based on batch_seq
   if (batch_seq % 8 == 0 && batch_seq >= 8)
-    linear_kernel_unrolled_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
-                                   d_output, d_input, d_weight, d_bias);
+    linear_kernel_unrolled_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output,
+                                    d_input, d_weight, d_bias);
   else
-    linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features,
-                                d_output, d_input, d_weight, d_bias);
+    linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output, d_input,
+                                 d_weight, d_bias);
 }
 
 } // namespace kernels
 
 // Linear function pullback
 template <typename T>
-void linear_pullback(const ::cladtorch::Tensor<T>& input, const ::cladtorch::Tensor<T>& weight, const ::cladtorch::Tensor<T>& bias,
-                     ::cladtorch::Tensor<T> _d_y,
-                     ::cladtorch::Tensor<T>* _d_input, ::cladtorch::Tensor<T>* _d_weight, ::cladtorch::Tensor<T>* _d_bias) {
+void linear_pullback(const ::cladtorch::Tensor<T>& input, const ::cladtorch::Tensor<T>& weight,
+                     const ::cladtorch::Tensor<T>& bias, ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_input,
+                     ::cladtorch::Tensor<T>* _d_weight, ::cladtorch::Tensor<T>* _d_bias) {
   static_assert(::std::is_same_v<T, float>, "Linear pullback currently only supports float tensors");
 
   // Extract dimensions (same as forward pass)
   const auto& input_shape = input.shape();
   const auto& weight_shape = weight.shape();
   const auto& bias_shape = bias.shape();
-  
+
   const int in_features = input_shape[input.ndim() - 1];
   const int out_features = weight_shape[0];
   const int batch_seq = input.num_elements() / in_features;
-  
+
   // Call the kernel pullback
-  kernels::linear_kernel_pullback(
-    input.data(), weight.data(), bias.data(), nullptr, // output not needed for pullback
-    static_cast<size_t>(batch_seq),
-    static_cast<size_t>(in_features),
-    static_cast<size_t>(out_features),
-    _d_y.data(),
-    _d_input->data(), _d_weight->data(), _d_bias->data()
-  );
+  kernels::linear_kernel_pullback(input.data(), weight.data(), bias.data(), nullptr, // output not needed for pullback
+                                  static_cast<size_t>(batch_seq), static_cast<size_t>(in_features),
+                                  static_cast<size_t>(out_features), _d_y.data(), _d_input->data(), _d_weight->data(),
+                                  _d_bias->data());
 }
 
 } // namespace cladtorch
@@ -528,6 +518,42 @@ void constructor_pullback(const ::cladtorch::Tensor<T>& other, ::cladtorch::Tens
                           ::cladtorch::Tensor<T>* _d_other) {
   *_d_other += *_d_this;
   _d_this->fill(0);
+}
+
+template <typename T>
+void transpose_pullback(const ::cladtorch::Tensor<T>* _this, int dim0, int dim1, ::cladtorch::Tensor<float> _d_y,
+                        ::cladtorch::Tensor<T>* _d_this, int* _d_dim0, int* _d_dim1) {
+  // The pullback of transpose is the transpose of the gradient with swapped dimensions
+  // _d_this->print();
+  // _d_y.print();
+  *_d_this += _d_y.transpose(dim0, dim1);
+  // _d_result->fill(0);
+}
+
+template <typename T>
+void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<int>& indices,
+                     ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
+                     ::cladtorch::Tensor<int>* _d_indices) {
+  // Indices don't have gradients since they are integers
+  (void)_d_indices;
+
+  // Calculate the size of each slice (everything after the first dimension)
+  int slice_size = 1;
+  for (int i = 1; i < _this->ndim(); ++i)
+    slice_size *= _this->shape()[i];
+
+  // Accumulate gradients back to the original tensor
+  for (int i = 0; i < indices.num_elements(); ++i) {
+    int idx = indices.data()[i];
+
+    // Get pointers to the relevant slices
+    const T* grad_slice = _d_y.data() + i * slice_size;
+    T* orig_slice = _d_this->data() + idx * slice_size;
+
+    // Accumulate gradients
+    for (int j = 0; j < slice_size; ++j)
+      orig_slice[j] += grad_slice[j];
+  }
 }
 } // namespace class_functions
 } // namespace custom_derivatives
