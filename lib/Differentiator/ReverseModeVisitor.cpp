@@ -396,11 +396,10 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
           }
           continue;
         }
-        auto VDDerivedType = utils::getNonConstType(paramTy, m_Sema);
+        auto VDDerivedType = utils::GetNonConstValueType(paramTy); //Type(paramTy, m_Sema);
         Expr* initExpr = nullptr;
         bool isDirectInit = false;
         if (clad::utils::isCladTorchTensor(VDDerivedType)) {
-          // param->Arg
           ParmVarDecl* newFuncParam = nullptr;
           for (auto* p : m_Derivative->parameters()) {
               if (p->getName() == param->getName()) {

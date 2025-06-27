@@ -719,16 +719,19 @@ template <typename T> Tensor<T> causal_softmax(const Tensor<T>& input, int vocab
 }
 
 // Batched cross-entropy loss
-template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const std::vector<int>& targets) {
+// template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const std::vector<int>& targets) {
+template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const Tensor<U>& targets) {
+  static_assert(std::is_integral_v<U>, "Targets tensor must contain integral class indices.");
+  CLAD_ASSERT(targets.ndim() == 1, "Targets tensor must be a 1D array");
   CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
   int batch_size = probs.size(0);
   int num_classes = probs.size(1);
-  CLAD_ASSERT(batch_size == targets.size(), "Batch size of probs and targets must match.");
+  CLAD_ASSERT(batch_size == targets.num_elements(), "Batch size of probs and targets must match.");
 
   float total_loss = 0.0f;
   for (int i = 0; i < batch_size; ++i) {
     const T* prob_slice = probs._data + i * num_classes;
-    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets[i], num_classes);
+    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets.at(i), num_classes);
   }
   auto ret = Tensor<T>::new_scalar(total_loss / batch_size);
   return ret; // Return mean loss as a scalar tensor

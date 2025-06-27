@@ -179,9 +179,11 @@ void softmax_pullback(const ::cladtorch::Tensor<T>& input, bool is_casual, int v
 }
 
 // Cross entropy loss pullback for batched version
-template <typename T>
-void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::std::vector<int>& targets, ::cladtorch::Tensor<T> _d_y,
-                                 ::cladtorch::Tensor<T>* _d_probs, ::std::vector<int>* _d_targets) {
+// template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const Tensor<U>& targets) {
+
+template <typename T, typename U>
+void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cladtorch::Tensor<U>& targets, ::cladtorch::Tensor<T> _d_y,
+                                 ::cladtorch::Tensor<T>* _d_probs, ::cladtorch::Tensor<U>* _d_targets) {
   // For cross entropy loss L = -log(p_target), the gradient is:
   // dL/dp_i = -1/p_target if i == target, 0 otherwise
   // But since we typically use softmax + cross entropy, the combined gradient is:
@@ -197,7 +199,7 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::st
   T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
   
   for (int batch = 0; batch < batch_size; ++batch) {
-    int target = targets[batch];
+    int target = targets.at(batch);
     for (int cls = 0; cls < num_classes; ++cls) {
       int idx = batch * num_classes + cls;
       if (cls == target) {

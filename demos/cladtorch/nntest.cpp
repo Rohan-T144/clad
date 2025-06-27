@@ -21,7 +21,7 @@ constexpr int HIDDEN_SIZE = 32;
 constexpr int OUTPUT_SIZE = 3;
 using namespace cladtorch;
 using FTensor = Tensor<float>;
-
+using ITensor = Tensor<int>;
 // Define tensor types
 struct Layer1 {
   FTensor W; // Weight matrix from input to output
@@ -90,7 +90,7 @@ float nn_loss(const NeuralNetwork nn, const FTensor input, int target) {
   return out.scalar();                                 // Get the scalar value from the 1D tensor
 }
 
-float batched_nn_loss(const NeuralNetwork nn, const FTensor input, vector<int> target) {
+float batched_nn_loss(const NeuralNetwork &nn, const FTensor &input, const ITensor &target) {
   FTensor probs_buffer = nn.forward(input);
   auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
   return out.scalar();                                 // Get the scalar value from the 1D tensor
@@ -175,7 +175,9 @@ int main() {
           batched_input.at(j, k) = train_inputs[i * BATCH_SIZE + j][k];
         }
       }
-      vector<int> batch_targets(train_targets.begin() + i * BATCH_SIZE, train_targets.begin() + min((i + 1) * BATCH_SIZE, (int)train_targets.size()));
+      int batch_size = min(BATCH_SIZE, (int)train_inputs.size() - i * BATCH_SIZE);
+      ITensor batch_targets({batch_size}, train_targets.data() + i * BATCH_SIZE);
+      // vector<int> batch_targets(train_targets.begin() + i * BATCH_SIZE, train_targets.begin() + min((i + 1) * BATCH_SIZE, (int)train_targets.size()));
       // Compute loss on the batch
       total_loss += batched_nn_loss(nn, batched_input, batch_targets);
       d_nn.zero_gradients(); // Reset gradients for the network
