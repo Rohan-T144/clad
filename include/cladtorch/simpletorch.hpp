@@ -727,10 +727,11 @@ template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const
 
   float total_loss = 0.0f;
   for (int i = 0; i < batch_size; ++i) {
-    const T* prob_slice = probs.data() + i * num_classes;
+    const T* prob_slice = probs._data + i * num_classes;
     total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets[i], num_classes);
   }
-  return Tensor<T>(total_loss / batch_size); // Return mean loss as a scalar tensor
+  auto ret = Tensor<T>::new_scalar(total_loss / batch_size);
+  return ret; // Return mean loss as a scalar tensor
 }
 
 // Single-instance cross-entropy loss

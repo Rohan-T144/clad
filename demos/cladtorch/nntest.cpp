@@ -30,8 +30,9 @@ struct Layer1 {
   Layer1() : W({HIDDEN_SIZE, INPUT_SIZE}), b({HIDDEN_SIZE}) {};
   // Forward pass for single layer
   FTensor forward(const FTensor& input) const {
-    auto w = matmul(W, input);
-    auto bout = w + b; // Add bias
+    // auto w = matmul(W, input);
+    // auto bout = w + b; // Add bias
+    auto bout = linear(input, W, b); // Linear layer: input @ W^T + b
     auto ret = gelu(bout); // Apply GELU activation
     return ret;
   }
@@ -82,13 +83,19 @@ struct NeuralNetwork {
 };
 
 // Loss function for the neural network
-// Note: input is now a template-based Tensor. Target is still int.
 // nn is passed by value for clad to differentiate its members.
 float nn_loss(const NeuralNetwork nn, const FTensor input, int target) {
-  Tensor probs_buffer = nn.forward(input);
+  FTensor probs_buffer = nn.forward(input);
   auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
   return out.scalar();                                 // Get the scalar value from the 1D tensor
 }
+
+float batched_nn_loss(const NeuralNetwork nn, const FTensor input, vector<int> target) {
+  FTensor probs_buffer = nn.forward(input);
+  auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
+  return out.scalar();                                 // Get the scalar value from the 1D tensor
+}
+
 
 // Simple classification function for generating synthetic data
 int classify_input(const float a[3]) {
@@ -148,33 +155,34 @@ int main() {
   // Gradient struct (same structure as network)
   NeuralNetwork d_nn;
   
-  auto grad = clad::gradient(nn_loss, "0");
+  // auto grad = clad::gradient(nn_loss, "0");
+  // grad.dump(); // Dump the gradient function for debugging
+  auto grad = clad::gradient(batched_nn_loss, "0");
   grad.dump(); // Dump the gradient function for debugging
-  FTensor input({INPUT_SIZE}, 0.0f); // Dummy input for gradient execution
-  grad.execute(nn, input, 0, &d_nn);
 
   float learning_rate = 0.01f;
   
   cout << "Training the model...\n";
-  // for (int epoch = 0; epoch < 1; ++epoch) {
   for (int epoch = 0; epoch < 20; ++epoch) {
     float total_loss = 0.0f;
-
-    // Training phase
-    // for (size_t i = 0; i < 2; ++i) {
-    for (size_t i = 0; i < train_inputs.size(); ++i) {
-      // std::cerr << "Training on input " << i + 1 << "/" << train_inputs.size() << endl;
-      FTensor input({3}, train_inputs[i].data());
-      int target = train_targets[i];
-      float loss = nn_loss(nn, input, target);
-      total_loss += loss;
-
-      // Compute gradients
-      d_nn.zero_gradients(); // Reset gradients
-      grad.execute(nn, input, target, &d_nn);
-      nn.update_weights(d_nn, 0.01f); // Update weights with learning rate
+    const int BATCH_SIZE = 10; // Batch size for training
+    FTensor batched_input({BATCH_SIZE, INPUT_SIZE}, 0.0f);
+    for (int i=0; i < train_inputs.size() / BATCH_SIZE; i++) {
+      // Fill the batch with inputs
+      for (int j = 0; j < BATCH_SIZE; ++j) {
+        if (i * BATCH_SIZE + j >= train_inputs.size()) break; // Avoid out-of-bounds
+        for (int k = 0; k < INPUT_SIZE; ++k) {
+          batched_input.at(j, k) = train_inputs[i * BATCH_SIZE + j][k];
+        }
+      }
+      vector<int> batch_targets(train_targets.begin() + i * BATCH_SIZE, train_targets.begin() + min((i + 1) * BATCH_SIZE, (int)train_targets.size()));
+      // Compute loss on the batch
+      total_loss += batched_nn_loss(nn, batched_input, batch_targets);
+      d_nn.zero_gradients(); // Reset gradients for the network
+      grad.execute(nn, batched_input, batch_targets, &d_nn); // Compute gradients
+      nn.update_weights(d_nn, learning_rate); // Update weights with gradients
     }
-    cout << "Epoch " << epoch + 1 << ", Loss: " << total_loss / train_inputs.size() << endl;
+    cout << "Epoch " << epoch + 1 << ", Loss: " << total_loss / (train_inputs.size() / BATCH_SIZE) << endl;
   }
 
   // Test the model

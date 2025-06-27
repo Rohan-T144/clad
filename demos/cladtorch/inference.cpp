@@ -31,7 +31,7 @@ int main() {
   GPT2 model("gpt2_124M.bin");
   const Config config = model.config;
 
-  int B = 4;
+  int B = 1;
   int T = 64;
 
   Tokenizer tokenizer("gpt2_tokenizer.bin");
