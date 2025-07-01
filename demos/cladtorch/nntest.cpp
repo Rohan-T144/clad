@@ -27,7 +27,12 @@ struct Layer1 {
   FTensor W; // Weight matrix from input to output
   FTensor b;             // Bias vector
   // Default constructor, Tensor initialization happens automatically
-  Layer1() : W({HIDDEN_SIZE, INPUT_SIZE}), b({HIDDEN_SIZE}) {};
+  Layer1() : W({HIDDEN_SIZE, HIDDEN_SIZE}), b({HIDDEN_SIZE}) {};
+  Layer1(int in_dims, int out_dims) : W({out_dims, in_dims}), b({out_dims}) {};
+  // Copy constructor
+  Layer1(const Layer1& other) : W(other.W), b(other.b) {
+    std::cout << "Copy constructor called for Layer1" << std::endl;
+  }
   // Forward pass for single layer
   FTensor forward(const FTensor& input) const {
     // auto w = matmul(W, input);
@@ -35,6 +40,10 @@ struct Layer1 {
     auto bout = linear(input, W, b); // Linear layer: input @ W^T + b
     auto ret = gelu(bout); // Apply GELU activation
     return ret;
+  }
+  void operator+=(const Layer1& other) {
+    W += other.W;
+    b += other.b;
   }
   void update_weights(const Layer1& d_l, float learning_rate) {
     W -= d_l.W * learning_rate;
@@ -62,21 +71,41 @@ struct Layer2 {
 
 struct NeuralNetwork {
   Layer1 l1;
+  vector<Layer1> ls;
   Layer2 l2;
+  NeuralNetwork() : l1(INPUT_SIZE, HIDDEN_SIZE) {
+    ls = {Layer1(HIDDEN_SIZE, HIDDEN_SIZE), Layer1(HIDDEN_SIZE, HIDDEN_SIZE)};
+  } // Initialize layers
   void zero_gradients() {
     l1.W.fill(0.0f);
     l1.b.fill(0.0f);
+    for (auto& layer : ls) {
+      layer.W.fill(0.0f);
+      layer.b.fill(0.0f);
+    }
     l2.W.fill(0.0f);
     l2.b.fill(0.0f);
   }
   void update_weights(const NeuralNetwork& d_nn, float learning_rate) {
     l1.update_weights(d_nn.l1, learning_rate);
+    for (size_t i = 0; i < ls.size(); ++i) {
+      ls[i].update_weights(d_nn.ls[i], learning_rate);
+    }
     l2.update_weights(d_nn.l2, learning_rate);
   }
   // Forward pass for prediction
   FTensor forward(const FTensor& input) const { 
     auto l1_out = l1.forward(input); // Forward through first layer
+    for (int i = 0; i < ls.size(); ++i) {
+      auto ret = ls[i].forward(l1_out);
+      l1_out = ret; // Forward through hidden layers
+      // l1_out = ls[i].forward(l1_out); // Forward through hidden layers
+    }
+    // for (const auto &l : ls) {
+    //   l1_out = l.forward(l1_out); // Forward through hidden layers
+    // }
     auto l2_out = l2.forward(l1_out); // Forward through second layer
+    auto res = l2_out.split(1, 0); // Split output into parts of 1
     auto soft = softmax(l2_out, false, 0); // Apply softmax to output layer
     return soft; // Return probabilities
   }

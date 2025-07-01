@@ -1604,9 +1604,22 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     // derived function. In the case of member functions, `implicit`
     // this object is always passed by reference.
     if (!nonDiff && !dfdx() && !utils::HasAnyReferenceOrPointerArgument(FD) &&
-        (!baseOriginalE || MD->isConst()))
-      nonDiff = true;
-
+        (!baseOriginalE || MD->isConst())) {
+        bool isSubscriptOperator = false;
+        // Check if the current CallExpr is an OperatorCallExpr for operator[].
+        if (const auto* OCE = dyn_cast<CXXOperatorCallExpr>(CE)) {
+            if (OCE->getOperator() == clang::OverloadedOperatorKind::OO_Subscript) {
+                isSubscriptOperator = true;
+            }
+        }
+    
+        // Only apply the nonDiff heuristic if this call is NOT a subscript operator.
+        // By doing this, we force Clad to take the full, robust code generation path
+        // for `vec[i]`, which correctly preserves it as the base for the `.forward()` call.
+        if (!isSubscriptOperator) {
+            nonDiff = true;
+        }
+    }
     // If all arguments are constant literals, then this does not contribute to
     // the gradient.
     if (!nonDiff && !isa<CXXMemberCallExpr>(CE) &&
@@ -1743,7 +1756,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         }
         CallArgDx.push_back(dArgRef);
         // Visit using uninitialized reference.
-        argDiff = Visit(arg, BuildDeclRef(dArgDecl));
+        argDiff = Visit(arg, BuildDeclRef(dArgDecl)); // currently nullptr for subscript i diff
       }
 
       // Save cloned arg in a "global" variable, so that it is accessible from
@@ -1810,7 +1823,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         if (baseTy->isPointerType())
           baseTy = baseTy->getPointeeType();
         CXXRecordDecl* baseRD = baseTy->getAsCXXRecordDecl();
-        bool shouldStore = utils::isCopyable(baseRD);
+        bool shouldStore = utils::isCopyable(baseRD); // TODO: shouldn't clone a std::vector
         if (shouldStore) {
           if (!isPassedByRef || MD->isConst()) {
             // FIXME: Custom _reverse_forw functions take the base by pointer.
@@ -2045,8 +2058,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     if (Expr* customForwardPassCE =
             BuildCallToCustomForwPassFn(CE, CallArgs, CallArgDx, baseExpr)) {
       addToCurrentBlock(baseDiffPush, direction::forward);
-      if (!needsForwPass)
-        return StmtDiff{customForwardPassCE};
+      // if (!needsForwPass)
+      //   return StmtDiff{customForwardPassCE};
       Expr* callRes = nullptr;
       if (isInsideLoop)
         callRes = GlobalStoreAndRef(customForwardPassCE, /*prefix=*/"_t",
@@ -2103,7 +2116,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                .ActOnCallExpr(getCurrentScope(), Clone(CE->getCallee()), Loc,
                               CallArgs, Loc, CUDAExecConfig)
                .get();
-    return StmtDiff(call);
+    return StmtDiff(call); // what is it doing with OverloadedDerivedFn?
   }
 
   Expr* ReverseModeVisitor::GetMultiArgCentralDiffCall(
