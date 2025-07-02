@@ -1824,6 +1824,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
           baseTy = baseTy->getPointeeType();
         CXXRecordDecl* baseRD = baseTy->getAsCXXRecordDecl();
         bool shouldStore = utils::isCopyable(baseRD); // TODO: shouldn't clone a std::vector
+        if (baseRD->getQualifiedNameAsString() == "std::vector")
+          shouldStore = false; // std::vector is copyable but let's not store it
         if (shouldStore) {
           if (!isPassedByRef || MD->isConst()) {
             // FIXME: Custom _reverse_forw functions take the base by pointer.
@@ -2109,6 +2111,13 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       if (isMethodOperatorCall)
         CallArgs.insert(CallArgs.begin(), baseDiff.getExpr());
       call = BuildOperatorCall(OCE->getOperator(), CallArgs);
+      if (OCE->getOperator() == clang::OverloadedOperatorKind::OO_Subscript) {
+        // If the operator is subscript, we should return the adjoint expression
+        CallArgs.erase(CallArgs.begin());
+        CallArgs.insert(CallArgs.begin(), baseDiff.getExpr_dx());
+        Expr* call_dx = BuildOperatorCall(OCE->getOperator(), CallArgs);
+        return StmtDiff(call, call_dx);
+      }
       return StmtDiff(call);
     }
 

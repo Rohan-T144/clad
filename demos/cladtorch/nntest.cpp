@@ -74,7 +74,7 @@ struct NeuralNetwork {
   vector<Layer1> ls;
   Layer2 l2;
   NeuralNetwork() : l1(INPUT_SIZE, HIDDEN_SIZE) {
-    ls = {Layer1(HIDDEN_SIZE, HIDDEN_SIZE), Layer1(HIDDEN_SIZE, HIDDEN_SIZE)};
+    ls = {Layer1(HIDDEN_SIZE, HIDDEN_SIZE), Layer1(HIDDEN_SIZE, HIDDEN_SIZE), Layer1(HIDDEN_SIZE, HIDDEN_SIZE)};
   } // Initialize layers
   void zero_gradients() {
     l1.W.fill(0.0f);
@@ -99,11 +99,7 @@ struct NeuralNetwork {
     for (int i = 0; i < ls.size(); ++i) {
       auto ret = ls[i].forward(l1_out);
       l1_out = ret; // Forward through hidden layers
-      // l1_out = ls[i].forward(l1_out); // Forward through hidden layers
     }
-    // for (const auto &l : ls) {
-    //   l1_out = l.forward(l1_out); // Forward through hidden layers
-    // }
     auto l2_out = l2.forward(l1_out); // Forward through second layer
     auto res = l2_out.split(1, 0); // Split output into parts of 1
     auto soft = softmax(l2_out, false, 0); // Apply softmax to output layer
@@ -111,13 +107,13 @@ struct NeuralNetwork {
   }
 };
 
-// Loss function for the neural network
-// nn is passed by value for clad to differentiate its members.
-float nn_loss(const NeuralNetwork nn, const FTensor input, int target) {
-  FTensor probs_buffer = nn.forward(input);
-  auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
-  return out.scalar();                                 // Get the scalar value from the 1D tensor
-}
+// // Loss function for the neural network
+// // nn is passed by value for clad to differentiate its members.
+// float nn_loss(const NeuralNetwork nn, const FTensor input, int target) {
+//   FTensor probs_buffer = nn.forward(input);
+//   auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
+//   return out.scalar();                                 // Get the scalar value from the 1D tensor
+// }
 
 float batched_nn_loss(const NeuralNetwork &nn, const FTensor &input, const ITensor &target) {
   FTensor probs_buffer = nn.forward(input);
@@ -224,6 +220,7 @@ int main() {
     auto input_data = generate_random_input();
     int true_class = classify_input(input_data.data());
     FTensor input({3}, input_data.data());
+    input.print();
     FTensor probs_out = nn.forward(input);
 
     // Find predicted class

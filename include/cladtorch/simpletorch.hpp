@@ -259,9 +259,7 @@ public:
     }
   }
 
-  void print(const std::string& title = "") const {
-    if (!title.empty())
-      std::cout << title;
+  void print() const {
     std::cout << " (Shape: [";
     for (int i = 0; i < _shape.size(); ++i)
       std::cout << _shape[i] << (i == _shape.size() - 1 ? "" : ", ");
