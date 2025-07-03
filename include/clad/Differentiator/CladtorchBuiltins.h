@@ -15,9 +15,8 @@ template <typename T> void zero_init(::cladtorch::Tensor<T>& tensor) {
   tensor.fill(0);
 }
 template <class T> void zero_init(std::vector<::cladtorch::Tensor<T>>& p) {
-  for (auto& elem : p) {
+  for (auto& elem : p)
     elem.fill(0);
-  }
 }
 
 // template <typename T, size_t... Dims>
@@ -205,7 +204,6 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cl
   int num_classes = probs.size(probs.ndim() - 1);
   int batch_size = probs.num_elements() / num_classes;
 
-
   // _d_y is a scalar (the loss), so we need to broadcast its gradient
   T loss_grad = _d_y.scalar();              // Extract scalar value
   T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
@@ -288,15 +286,69 @@ void linear_kernel_naive_pullback(const float* input, const float* weight, const
     }
   }
 }
+constexpr int UNROLL = 8;
 
-// Linear kernel unrolled pullback
-void linear_kernel_unrolled_pullback(const float* input, const float* weight, const float* bias, float* output,
-                                     size_t batch_seq, size_t in_features, size_t out_features, const float* d_output,
-                                     float* d_input, float* d_weight, float* d_bias) {
-  // For efficiency, we'll delegate to the naive version for now
-  // A fully optimized unrolled version would be more complex
-  linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output, d_input,
-                               d_weight, d_bias);
+/*  Pull-back for y = x Wᵀ + b
+ *
+ *  input   : [batch_seq , in_features]   (row major)
+ *  weight  : [out_feat  , in_features]   (row major)
+ *  d_output: [batch_seq , out_features]  (row major)
+ *
+ *  All gradient buffers are assumed to be zero-initialised by the caller.
+ *  Thread-safe: every parallel section writes to a disjoint slice.
+ */
+inline void linear_kernel_unrolled_pullback(const float* input, const float* weight,
+                                            const float* /*bias*/, float* /*output*/, // not needed here
+                                            size_t batch_seq, size_t in_features, size_t out_features,
+                                            const float* d_output, float* d_input, float* d_weight, float* d_bias) {
+// ---------- 1. d_input = d_output · W  -----------------------------------
+#pragma omp parallel for schedule(static)
+  for (size_t i0 = 0; i0 < batch_seq; i0 += UNROLL) {
+    for (size_t k = 0; k < in_features; ++k) {
+      float accum[UNROLL] = {0};
+
+      for (size_t j = 0; j < out_features; ++j) {
+        const float w_jk = weight[j * in_features + k]; // W[j,k]
+#pragma omp simd
+        for (int u = 0; u < UNROLL; ++u)
+          accum[u] += d_output[(i0 + u) * out_features + j] * w_jk;
+      }
+
+#pragma omp simd
+      for (int u = 0; u < UNROLL; ++u)
+        d_input[(i0 + u) * in_features + k] += accum[u];
+    }
+  }
+
+// ---------- 2. d_weight & d_bias  ----------------------------------------
+#pragma omp parallel for schedule(static)
+  for (size_t j = 0; j < out_features; ++j) {
+    ::std::vector<float> local_dw(in_features, 0.0f); // private to this thread
+    float local_db = 0.0f;
+
+    for (size_t i0 = 0; i0 < batch_seq; i0 += UNROLL) {
+      float dout_blk[UNROLL];
+
+#pragma omp simd
+      for (int u = 0; u < UNROLL; ++u) {
+        dout_blk[u] = d_output[(i0 + u) * out_features + j];
+        local_db += dout_blk[u]; // bias grad
+      }
+
+      for (size_t k = 0; k < in_features; ++k) {
+        float acc = 0.0f;
+#pragma omp simd reduction(+ : acc)
+        for (int u = 0; u < UNROLL; ++u)
+          acc += dout_blk[u] * input[(i0 + u) * in_features + k];
+        local_dw[k] += acc; // weight grad
+      }
+    }
+
+    // write-back – this thread is the *sole* owner of (j, :)
+    d_bias[j] += local_db;
+    for (size_t k = 0; k < in_features; ++k)
+      d_weight[j * in_features + k] += local_dw[k];
+  }
 }
 
 // Linear kernel pullback dispatcher
@@ -371,20 +423,18 @@ void operator_plus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
                             ::cladtorch::Tensor<float>* _d_other) {
   // For +, gradient flows to both operands
   *_d_this += _d_y;
-  if (_d_other->shape()==_d_y.shape()) {
+  if (_d_other->shape() == _d_y.shape()) {
     *_d_other += _d_y;
   } else {
     // If shapes don't match, we assume _d_y is batched, and _d_other is not
-    CLAD_ASSERT(_d_other->ndim()==1, "_d_other needs to be 1D");
-    CLAD_ASSERT(_d_y.size(_d_y.ndim()-1) == _d_other->num_elements(), 
+    CLAD_ASSERT(_d_other->ndim() == 1, "_d_other needs to be 1D");
+    CLAD_ASSERT(_d_y.size(_d_y.ndim() - 1) == _d_other->num_elements(),
                 "Shape mismatch in operator+ pullback: _d_y and _d_other must have compatible shapes.");
     int batch_size = _d_y.num_elements() / _d_other->num_elements();
     int len = _d_other->num_elements();
-    for (int i=0;i<batch_size;i++) {
-      for (int j=0;j<len;j++) {
-        _d_other->_data[j] += _d_y._data[i*len+j];
-      }
-    }
+    for (int i = 0; i < batch_size; i++)
+      for (int j = 0; j < len; j++)
+        _d_other->_data[j] += _d_y._data[i * len + j];
     // *_d_other += _d_y; // Assuming _d_y can be broadcasted to both shapes
   }
 }
@@ -442,11 +492,9 @@ void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
                 "Shape mismatch in operator* pullback: _d_y and _d_other must have compatible shapes.");
     int batch_size = _d_y.num_elements() / _d_other->num_elements();
     int len = _d_other->num_elements();
-    for (int i = 0; i < batch_size; i++) {
-      for (int j = 0; j < len; j++) {
+    for (int i = 0; i < batch_size; i++)
+      for (int j = 0; j < len; j++)
         _d_other->_data[j] += grad_other._data[i * len + j];
-      }
-    }
   }
 }
 
@@ -555,30 +603,29 @@ operator_equal_pushforward(::cladtorch::Tensor<T>* a, const ::cladtorch::Tensor<
 // }
 
 template <typename T>
-clad::ValueAndAdjoint<::cladtorch::Tensor<T> &, ::cladtorch::Tensor<T> &> operator_equal_reverse_forw(::cladtorch::Tensor<T> *_this, const ::cladtorch::Tensor<T> &other, ::cladtorch::Tensor<T> *_d_this, const ::cladtorch::Tensor<T> &_d_other) {
+clad::ValueAndAdjoint<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+operator_equal_reverse_forw(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
+                            ::cladtorch::Tensor<T>* _d_this, const ::cladtorch::Tensor<T>& _d_other) {
   *_this = other;
   *_d_this = _d_other;
   return {*_this, *_d_this};
 }
 
-
 template <typename T>
 void operator_equal_pullback(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
-                                  ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                                  ::cladtorch::Tensor<T>* _d_other) {
+                             ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
+                             ::cladtorch::Tensor<T>* _d_other) {
   // For assignment, the gradient flows to both tensors
   *_d_other += *_d_this;
 }
 
 template <typename T>
-void operator_equal_pullback(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T>&& other,
-                                  ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                                  ::cladtorch::Tensor<T>* _d_other) {
+void operator_equal_pullback(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T>&& other, ::cladtorch::Tensor<T> _d_y,
+                             ::cladtorch::Tensor<T>* _d_this, ::cladtorch::Tensor<T>* _d_other) {
   // For assignment, the gradient flows to both tensors
   // *_d_this += _d_y;
   *_d_other += *_d_this;
 }
-
 
 template <typename T>
 clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
@@ -612,7 +659,6 @@ void constructor_pullback(const ::std::vector<int>& shape, ::cladtorch::Tensor<T
   // _d_this->fill(0);
 }
 
-
 template <typename T>
 void transpose_pullback(const ::cladtorch::Tensor<T>* _this, int dim0, int dim1, ::cladtorch::Tensor<float> _d_y,
                         ::cladtorch::Tensor<T>* _d_this, int* _d_dim0, int* _d_dim1) {
@@ -625,8 +671,7 @@ void transpose_pullback(const ::cladtorch::Tensor<T>* _this, int dim0, int dim1,
 
 template <typename T, typename U>
 void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<U>& indices,
-                     ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                     ::cladtorch::Tensor<U>* _d_indices) {
+                     ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this, ::cladtorch::Tensor<U>* _d_indices) {
   // Indices don't have gradients since they are integers
   (void)_d_indices;
 
@@ -651,11 +696,10 @@ void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Ten
 
 template <typename T, typename U>
 void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<U>& new_shape,
-                      ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                      ::std::vector<U>* _d_new_shape) {
+                      ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this, ::std::vector<U>* _d_new_shape) {
   // new_shape doesn't have gradients since it's a shape specification
   (void)_d_new_shape;
-  
+
   // Reshape is just a reinterpretation of the same data, so we need to
   // reshape the gradient back to the original shape and accumulate
   // ::cladtorch::Tensor<T> reshaped_grad = ;
@@ -663,10 +707,9 @@ void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<U
 }
 
 template <typename T>
-void norm_pullback(const ::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T> _d_y,
-                   ::cladtorch::Tensor<T>* _d_this) {
+void norm_pullback(const ::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this) {
   static_assert(::std::is_same_v<T, float>, "norm_pullback() is only supported for float tensors.");
-  
+
   if (_this->num_elements() == 0)
     return;
 
@@ -715,35 +758,34 @@ void norm_pullback(const ::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T> _
 
 // TODO FIXME: Modify clad to copy-initialize vectors of tensors so that _d_y can be properly calculated
 template <typename T>
-void split_pullback(const ::cladtorch::Tensor<T>* _this, int size, int axis,
-                    ::std::vector<::cladtorch::Tensor<T>> _d_y,
+void split_pullback(const ::cladtorch::Tensor<T>* _this, int size, int axis, ::std::vector<::cladtorch::Tensor<T>> _d_y,
                     ::cladtorch::Tensor<T>* _d_this, int* _d_size, int* _d_axis) {
   // size and axis don't have gradients since they are parameters
   (void)_d_size;
   (void)_d_axis;
-  
+
   // Split creates multiple tensors from one, so the pullback needs to
   // concatenate the gradients back along the split axis
   int num_splits = _this->shape()[axis] / size;
-  
+
   // For each split, accumulate gradients back to the appropriate slice
   for (int i = 0; i < num_splits; ++i) {
     if (i < (int)_d_y.size()) {
       const ::cladtorch::Tensor<T>& split_grad = _d_y[i];
-      
+
       // Calculate the offset for this split in the original tensor
       int split_offset = i * size;
-      
+
       // Calculate slice size for elements after the split axis
       int slice_size = 1;
       for (int dim = axis + 1; dim < _this->ndim(); ++dim)
         slice_size *= _this->shape()[dim];
-      
+
       // Calculate stride for the split axis
       int axis_stride = 1;
       for (int dim = axis + 1; dim < _this->ndim(); ++dim)
         axis_stride *= _this->shape()[dim];
-      
+
       // Copy gradients back to the original tensor
       for (int elem = 0; elem < split_grad.num_elements(); ++elem) {
         // Calculate multi-dimensional coordinates in the split tensor
@@ -753,10 +795,10 @@ void split_pullback(const ::cladtorch::Tensor<T>* _this, int size, int axis,
           coords[dim] = temp_idx % split_grad.shape()[dim];
           temp_idx /= split_grad.shape()[dim];
         }
-        
+
         // Adjust coordinate for the split axis
         coords[axis] += split_offset;
-        
+
         // Calculate flat index in the original tensor
         int orig_idx = 0;
         for (int dim = 0; dim < _this->ndim(); ++dim) {
@@ -765,7 +807,7 @@ void split_pullback(const ::cladtorch::Tensor<T>* _this, int size, int axis,
             stride *= _this->shape()[d];
           orig_idx += coords[dim] * stride;
         }
-        
+
         _d_this->data()[orig_idx] += split_grad.data()[elem];
       }
     }
