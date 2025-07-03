@@ -31,7 +31,6 @@ struct Layer1 {
   Layer1(int in_dims, int out_dims) : W({out_dims, in_dims}), b({out_dims}) {};
   // Copy constructor
   Layer1(const Layer1& other) : W(other.W), b(other.b) {
-    std::cout << "Copy constructor called for Layer1" << std::endl;
   }
   // Forward pass for single layer
   FTensor forward(const FTensor& input) const {
@@ -97,6 +96,7 @@ struct NeuralNetwork {
   FTensor forward(const FTensor& input) const { 
     auto l1_out = l1.forward(input); // Forward through first layer
     for (int i = 0; i < ls.size(); ++i) {
+      // l1_out = ls[i].forward(l1_out); // Forward through hidden layers
       auto ret = ls[i].forward(l1_out);
       l1_out = ret; // Forward through hidden layers
     }
@@ -107,14 +107,8 @@ struct NeuralNetwork {
   }
 };
 
-// // Loss function for the neural network
-// // nn is passed by value for clad to differentiate its members.
-// float nn_loss(const NeuralNetwork nn, const FTensor input, int target) {
-//   FTensor probs_buffer = nn.forward(input);
-//   auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
-//   return out.scalar();                                 // Get the scalar value from the 1D tensor
-// }
-
+// Loss function for the neural network
+// nn is passed by value for clad to differentiate its members.
 float batched_nn_loss(const NeuralNetwork &nn, const FTensor &input, const ITensor &target) {
   FTensor probs_buffer = nn.forward(input);
   auto out = cross_entropy_loss(probs_buffer, target); // Returns 1D tensor with the loss
@@ -188,9 +182,9 @@ int main() {
   float learning_rate = 0.01f;
   
   cout << "Training the model...\n";
-  for (int epoch = 0; epoch < 20; ++epoch) {
+  for (int epoch = 0; epoch < 40; ++epoch) {
     float total_loss = 0.0f;
-    const int BATCH_SIZE = 10; // Batch size for training
+    const int BATCH_SIZE = 16; // Batch size for training
     FTensor batched_input({BATCH_SIZE, INPUT_SIZE}, 0.0f);
     for (int i=0; i < train_inputs.size() / BATCH_SIZE; i++) {
       // Fill the batch with inputs
@@ -220,7 +214,6 @@ int main() {
     auto input_data = generate_random_input();
     int true_class = classify_input(input_data.data());
     FTensor input({3}, input_data.data());
-    input.print();
     FTensor probs_out = nn.forward(input);
 
     // Find predicted class

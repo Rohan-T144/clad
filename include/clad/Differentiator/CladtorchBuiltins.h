@@ -504,6 +504,41 @@ operator_equal_pushforward(::cladtorch::Tensor<T>* a, const ::cladtorch::Tensor<
   return {*a, *d_a};
 }
 
+// template <typename T>
+// clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+// operator_equal_pushforward(::cladtorch::Tensor<T>* a, ::cladtorch::Tensor<T>&& param, ::cladtorch::Tensor<T>* d_a,
+//                            ::cladtorch::Tensor<T>&& d_param) {
+//   *a = param;
+//   *d_a = d_param;
+//   return {*a, *d_a};
+// }
+
+template <typename T>
+clad::ValueAndAdjoint<::cladtorch::Tensor<T> &, ::cladtorch::Tensor<T> &> operator_equal_reverse_forw(::cladtorch::Tensor<T> *_this, const ::cladtorch::Tensor<T> &other, ::cladtorch::Tensor<T> *_d_this, const ::cladtorch::Tensor<T> &_d_other) {
+  *_this = other;
+  *_d_this = _d_other;
+  return {*_this, *_d_this};
+}
+
+
+template <typename T>
+void operator_equal_pullback(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
+                                  ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
+                                  ::cladtorch::Tensor<T>* _d_other) {
+  // For assignment, the gradient flows to both tensors
+  *_d_other += *_d_this;
+}
+
+template <typename T>
+void operator_equal_pullback(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T>&& other,
+                                  ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
+                                  ::cladtorch::Tensor<T>* _d_other) {
+  // For assignment, the gradient flows to both tensors
+  // *_d_this += _d_y;
+  *_d_other += *_d_this;
+}
+
+
 template <typename T>
 clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
 constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const ::cladtorch::Tensor<T>& p,

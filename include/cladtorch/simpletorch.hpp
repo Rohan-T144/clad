@@ -113,7 +113,7 @@ public:
   }
 
   // Copy assignment
-  ND Tensor& operator=(const Tensor& other) {
+  Tensor& operator=(const Tensor& other) {
     if (this != &other) {
       delete[] _data;
       _shape = other._shape;
@@ -151,7 +151,7 @@ public:
   // }
 
   // Move assignment
-  ND Tensor& operator=(Tensor&& other) noexcept {
+  Tensor& operator=(Tensor&& other) {
     if (this != &other) {
       delete[] _data;
       _shape = std::move(other._shape);
