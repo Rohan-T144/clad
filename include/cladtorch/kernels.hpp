@@ -154,8 +154,8 @@ inline void linear_kernel_naive(const float* input, const float* weight, const f
     }
   }
 }
-
-inline void linear_kernel_unrolled(const float* input, const float* weight, const float* bias, float* output,
+template <typename T>
+inline void linear_kernel_unrolled(const T* input, const T* weight, const T* bias, T* output,
                                    size_t batch_seq, size_t in_features, size_t out_features) {
   // Unrolled version for better performance when batch_seq % UNROLL == 0
   #pragma omp parallel for
@@ -189,24 +189,28 @@ inline void linear_kernel(const float* input, const float* weight, const float* 
   else
     linear_kernel_naive(input, weight, bias, output, batch_seq, in_features, out_features);
 }
-
-inline void element_wise_add_kernel(const float* a, const float* b, float* r, size_t n) {
+template<typename T>
+inline void element_wise_add_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] + b[i];
 }
-inline void element_wise_sub_kernel(const float* a, const float* b, float* r, size_t n) {
+template<typename T>
+inline void element_wise_sub_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] - b[i];
 }
-inline void element_wise_mul_kernel(const float* a, const float* b, float* r, size_t n) {
+template<typename T>
+inline void element_wise_mul_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] * b[i];
 }
-inline void scalar_mul_kernel(const float* in, float s, float* r, size_t n) {
+template<typename T>
+inline void scalar_mul_kernel(const T* in, T s, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = in[i] * s;
 }
-inline void scalar_div_kernel(const float* in, float s, float* r, size_t n) {
+template<typename T>
+inline void scalar_div_kernel(const T* in, T s, T* r, size_t n) {
   CLAD_ASSERT(s != 0.0f, "Division by zero.");
   for (size_t i = 0; i < n; ++i)
     r[i] = in[i] / s;

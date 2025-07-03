@@ -168,7 +168,7 @@ public:
   const std::vector<int>& shape() const { return _shape; }
   int ndim() const { return _shape.size(); }
   int num_elements() const { return _num_elements; }
-  int size(int dim) const {
+  ND int size(int dim) const {
     CLAD_ASSERT(dim < _shape.size(), "Dimension index out of range.");
     return _shape[dim];
   }
@@ -294,7 +294,9 @@ public:
   }
 
   // Lookup operation: select slices from this tensor using indices
-  Tensor<T> lookup(const Tensor<int>& indices) const {
+  template <typename U>
+  Tensor<T> lookup(const Tensor<U>& indices) const {
+    static_assert(std::is_integral_v<U>, "Indices must be integral type.");
     CLAD_ASSERT(ndim() > 0, "Cannot lookup from a scalar tensor.");
     CLAD_ASSERT(_data != nullptr, "Cannot lookup from null data tensor.");
 
@@ -733,16 +735,20 @@ template <typename T> Tensor<T> causal_softmax(const Tensor<T>& input, int vocab
 // template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const std::vector<int>& targets) {
 template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const Tensor<U>& targets) {
   static_assert(std::is_integral_v<U>, "Targets tensor must contain integral class indices.");
-  CLAD_ASSERT(targets.ndim() == 1, "Targets tensor must be a 1D array");
-  CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
-  int batch_size = probs.size(0);
-  int num_classes = probs.size(1);
+  // CLAD_ASSERT(targets.ndim() == 1, "Targets tensor must be a 1D array");
+  // CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
+  // int batch_size = probs.size(0);
+  for (int i = 0; i < targets.ndim(); ++i) {
+    CLAD_ASSERT(targets.size(i) == probs.size(i), "Targets tensor must be a 1D array of class indices.");
+  }
+  int num_classes = probs.size(probs.ndim() - 1);
+  int batch_size = probs.num_elements() / num_classes;
   CLAD_ASSERT(batch_size == targets.num_elements(), "Batch size of probs and targets must match.");
 
   T total_loss = 0;
   for (int i = 0; i < batch_size; ++i) {
     const T* prob_slice = probs._data + i * num_classes;
-    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets.at(i), num_classes);
+    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets._data[i], num_classes);
   }
   auto ret = Tensor<T>::new_scalar(total_loss / batch_size);
   return ret; // Return mean loss as a scalar tensor

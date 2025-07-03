@@ -1,16 +1,25 @@
-#include <clad/Differentiator/STLBuiltins.h>
+// #include <clad/Differentiator/STLBuiltins.h>
+#include <clad/Differentiator/Array.h>
+#include <clad/Differentiator/BuiltinDerivatives.h>
+#include <clad/Differentiator/FunctionTraits.h>
 #include <cladtorch/simpletorch.hpp>
 // #include <cladtorch/statictorch.hpp>
 
 namespace clad {
 // specialize the zero_init function for Tensor
-template <typename T> void zero_init(cladtorch::Tensor<T>& tensor) {
+template <typename T> void zero_init(::cladtorch::Tensor<T>& tensor) {
   // std::cerr << "==========================================================================" << ::std::endl;
   // std::cerr << "Zero initializing tensor with shape: ";
   // tensor.print();
   // std::cerr << "==========================================================================" << ::std::endl;
   tensor.fill(0);
 }
+template <class T> void zero_init(std::vector<::cladtorch::Tensor<T>>& p) {
+  for (auto& elem : p) {
+    elem.fill(0);
+  }
+}
+
 // template <typename T, size_t... Dims>
 // void zero_init(cladtorch::Tensor<T, Dims...>& tensor) {
 //   tensor.fill(0);
@@ -190,16 +199,19 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cl
   // dL/dx_i = p_i - 1 if i == target, p_i otherwise
   // However, here we only have probs, so: dL/dp_i = -1/p_target if i == target
 
-  CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
-  int batch_size = probs.size(0);
-  int num_classes = probs.size(1);
+  // CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
+  // int batch_size = probs.size(0);
+  // int num_classes = probs.size(1);
+  int num_classes = probs.size(probs.ndim() - 1);
+  int batch_size = probs.num_elements() / num_classes;
+
 
   // _d_y is a scalar (the loss), so we need to broadcast its gradient
   T loss_grad = _d_y.scalar();              // Extract scalar value
   T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
 
   for (int batch = 0; batch < batch_size; ++batch) {
-    int target = targets.at(batch);
+    int target = targets._data[batch];
     for (int cls = 0; cls < num_classes; ++cls) {
       int idx = batch * num_classes + cls;
       if (cls == target) {
@@ -359,7 +371,22 @@ void operator_plus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
                             ::cladtorch::Tensor<float>* _d_other) {
   // For +, gradient flows to both operands
   *_d_this += _d_y;
-  *_d_other += _d_y;
+  if (_d_other->shape()==_d_y.shape()) {
+    *_d_other += _d_y;
+  } else {
+    // If shapes don't match, we assume _d_y is batched, and _d_other is not
+    CLAD_ASSERT(_d_other->ndim()==1, "_d_other needs to be 1D");
+    CLAD_ASSERT(_d_y.size(_d_y.ndim()-1) == _d_other->num_elements(), 
+                "Shape mismatch in operator+ pullback: _d_y and _d_other must have compatible shapes.");
+    int batch_size = _d_y.num_elements() / _d_other->num_elements();
+    int len = _d_other->num_elements();
+    for (int i=0;i<batch_size;i++) {
+      for (int j=0;j<len;j++) {
+        _d_other->_data[j] += _d_y._data[i*len+j];
+      }
+    }
+    // *_d_other += _d_y; // Assuming _d_y can be broadcasted to both shapes
+  }
 }
 
 // Subtraction operators
@@ -406,7 +433,21 @@ void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
 
   // For d_other, gradient is d_y * _this
   auto grad_other = _d_y * (*_this);
-  *_d_other += grad_other;
+  if (grad_other.shape() == _d_other->shape()) {
+    *_d_other += grad_other; // If shapes match, add directly
+  } else {
+    // If shapes don't match, we assume _d_y is batched, and _d_other is not
+    CLAD_ASSERT(_d_other->ndim() == 1, "_d_other needs to be 1D");
+    CLAD_ASSERT(_d_y.size(_d_y.ndim() - 1) == _d_other->num_elements(),
+                "Shape mismatch in operator* pullback: _d_y and _d_other must have compatible shapes.");
+    int batch_size = _d_y.num_elements() / _d_other->num_elements();
+    int len = _d_other->num_elements();
+    for (int i = 0; i < batch_size; i++) {
+      for (int j = 0; j < len; j++) {
+        _d_other->_data[j] += grad_other._data[i * len + j];
+      }
+    }
+  }
 }
 
 // Scalar multiplication operators
@@ -556,6 +597,23 @@ void constructor_pullback(const ::cladtorch::Tensor<T>& other, ::cladtorch::Tens
 }
 
 template <typename T>
+clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
+constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const ::std::vector<int>& shape,
+                        const ::std::vector<int>& d_shape) {
+  ::cladtorch::Tensor<T> v(shape);
+  ::cladtorch::Tensor<T> d_v(d_shape);
+  return {v, d_v};
+}
+
+template <typename T>
+void constructor_pullback(const ::std::vector<int>& shape, ::cladtorch::Tensor<T>* _d_this,
+                          ::std::vector<int>* d_shape) {
+  // *_d_other += *_d_this;
+  // _d_this->fill(0);
+}
+
+
+template <typename T>
 void transpose_pullback(const ::cladtorch::Tensor<T>* _this, int dim0, int dim1, ::cladtorch::Tensor<float> _d_y,
                         ::cladtorch::Tensor<T>* _d_this, int* _d_dim0, int* _d_dim1) {
   // The pullback of transpose is the transpose of the gradient with swapped dimensions
@@ -565,10 +623,10 @@ void transpose_pullback(const ::cladtorch::Tensor<T>* _this, int dim0, int dim1,
   // _d_result->fill(0);
 }
 
-template <typename T>
-void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<int>& indices,
+template <typename T, typename U>
+void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<U>& indices,
                      ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                     ::cladtorch::Tensor<int>* _d_indices) {
+                     ::cladtorch::Tensor<U>* _d_indices) {
   // Indices don't have gradients since they are integers
   (void)_d_indices;
 
@@ -591,10 +649,10 @@ void lookup_pullback(const ::cladtorch::Tensor<T>* _this, const ::cladtorch::Ten
   }
 }
 
-template <typename T>
-void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<int>& new_shape,
+template <typename T, typename U>
+void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<U>& new_shape,
                       ::cladtorch::Tensor<T> _d_y, ::cladtorch::Tensor<T>* _d_this,
-                      ::std::vector<int>* _d_new_shape) {
+                      ::std::vector<U>* _d_new_shape) {
   // new_shape doesn't have gradients since it's a shape specification
   (void)_d_new_shape;
   
@@ -602,6 +660,57 @@ void reshape_pullback(const ::cladtorch::Tensor<T>* _this, const ::std::vector<i
   // reshape the gradient back to the original shape and accumulate
   // ::cladtorch::Tensor<T> reshaped_grad = ;
   *_d_this += _d_y.reshape(_this->shape());
+}
+
+template <typename T>
+void norm_pullback(const ::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T> _d_y,
+                   ::cladtorch::Tensor<T>* _d_this) {
+  static_assert(::std::is_same_v<T, float>, "norm_pullback() is only supported for float tensors.");
+  
+  if (_this->num_elements() == 0)
+    return;
+
+  // Calculate number of vectors and vector size
+  int vec_size = _this->shape().back(); // Last dimension
+  int num_vectors = _this->num_elements() / vec_size;
+  float eps = 1e-5f;
+
+  for (int idx = 0; idx < num_vectors; ++idx) {
+    const float* x_vec = _this->data() + idx * vec_size;
+    const float* grad_out = _d_y.data() + idx * vec_size;
+    float* grad_in = _d_this->data() + idx * vec_size;
+
+    // Compute mean and rstd (same as forward pass)
+    float mean = 0.0f;
+    for (int i = 0; i < vec_size; i++)
+      mean += x_vec[i];
+    mean /= vec_size;
+
+    float var = 0.0f;
+    for (int i = 0; i < vec_size; i++) {
+      float diff = x_vec[i] - mean;
+      var += diff * diff;
+    }
+    var /= vec_size;
+    float rstd = 1.0f / ::std::sqrt(var + eps);
+
+    // Compute gradient statistics
+    float grad_mean = 0.0f;
+    for (int i = 0; i < vec_size; i++)
+      grad_mean += grad_out[i];
+    grad_mean /= vec_size;
+
+    float grad_norm_mean = 0.0f;
+    for (int i = 0; i < vec_size; i++)
+      grad_norm_mean += grad_out[i] * (x_vec[i] - mean);
+    grad_norm_mean /= vec_size;
+
+    // Apply layer norm gradient formula
+    for (int i = 0; i < vec_size; i++) {
+      float normalized = (x_vec[i] - mean) * rstd;
+      grad_in[i] += rstd * (grad_out[i] - grad_mean - normalized * grad_norm_mean * rstd);
+    }
+  }
 }
 
 // TODO FIXME: Modify clad to copy-initialize vectors of tensors so that _d_y can be properly calculated

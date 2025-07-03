@@ -36,6 +36,7 @@ struct Layer1 {
   FTensor forward(const FTensor& input) const {
     // auto w = matmul(W, input);
     // auto bout = w + b; // Add bias
+    // return gelu(linear(input, W, b)); // Apply GELU activation
     auto bout = linear(input, W, b); // Linear layer: input @ W^T + b
     auto ret = gelu(bout); // Apply GELU activation
     return ret;
@@ -58,8 +59,10 @@ struct Layer2 {
   Layer2() : W({HIDDEN_SIZE, OUTPUT_SIZE}), b({OUTPUT_SIZE}) {};
   // Forward pass for Layer 2
   FTensor forward(const FTensor& hidden) const { 
+    // return linear(hidden, W.transpose(0, 1), b);
     auto wT = W.transpose(0, 1); // Transpose weight matrix for multiplication
     auto ret = linear(hidden, wT, b); // Linear layer: hidden @ W^T + b
+    // auto rt2 = ret.norm();
     return ret;
   }
   void update_weights(const Layer2& d_l, float learning_rate) {

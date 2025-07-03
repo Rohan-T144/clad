@@ -25,6 +25,12 @@ template <class T> void zero_init(typename std::allocator<T>&) {
   // do nothing, unclear if allocators have differentiable properties.
 }
 
+template <class T> void zero_init(std::vector<T>& p) {
+  for (auto& elem : p) {
+    ::clad::zero_init(elem);
+  }
+}
+
 namespace custom_derivatives {
 namespace class_functions {
 
