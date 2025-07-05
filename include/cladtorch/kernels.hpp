@@ -6,6 +6,10 @@
 #include <omp.h>
 #endif
 
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h> // For optimized math operations on Apple platforms
+#endif
+
 #define CLAD_ASSERT(condition, message) assert((condition) && message)
 
 // -------------------- Kernel Functions (Operating on raw pointers) --------------------
@@ -113,6 +117,11 @@ inline void mat_mul_kernel_unrolled(const float* a, const float* b, float* out, 
 
 inline void mat_mul_kernel(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
   // Dispatch to unrolled or regular kernel based on R
+  #ifdef __APPLE__
+  // Use Accelerate framework for unrolled matrix multiplication
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, R, C2, C1, 1.0f, a, C1, b, C2, 0.0f, out, C2);
+  return;
+  #endif
   if (R % UNROLL == 0)
     mat_mul_kernel_unrolled(a, b, out, R, C1, C2);
   else
@@ -183,6 +192,38 @@ inline void linear_kernel_unrolled(const T* input, const T* weight, const T* bia
 
 inline void linear_kernel(const float* input, const float* weight, const float* bias, float* output,
                           size_t batch_seq, size_t in_features, size_t out_features) {
+  #ifdef __APPLE__
+  // 1) Broadcast the bias into each row of `output`
+  //    output[i, j] = bias[j]
+  #pragma omp parallel for
+  for (size_t i = 0; i < batch_seq; ++i) {
+    float* out_row = output + i * out_features;
+    for (size_t j = 0; j < out_features; ++j) {
+      out_row[j] = bias[j];
+    }
+  }
+  // 2) Compute output += input @ weight^T
+  //
+  // In BLAS terms (row-major):
+  //   C := α·A·Bᵀ + β·C
+  // 
+  // A = input        (batch_seq × in_features)
+  // B = weight       (out_features × in_features)
+  // Bᵀ = weightᵀ    (in_features × out_features)
+  // C = output       (batch_seq × out_features)
+  //
+  // We want α=1.0, β=1.0 (so that C starts at bias and adds the matmul).
+  cblas_sgemm(
+    /* order     */ CblasRowMajor,
+    /* transA    */ CblasNoTrans,
+    /* transB    */ CblasTrans,
+    /* M,N,K     */ (int)batch_seq, (int)out_features, (int)in_features,
+    /* α         */ 1.0f,
+    /* A, lda    */ input,  (int)in_features,
+    /* B, ldb    */ weight, (int)in_features,
+    /* β, C, ldc */ 1.0f,   output, (int)out_features
+  );
+  #endif
   // Dispatch to unrolled or regular kernel based on batch_seq
   if (batch_seq % UNROLL == 0 && batch_seq >= UNROLL)
     linear_kernel_unrolled(input, weight, bias, output, batch_seq, in_features, out_features);

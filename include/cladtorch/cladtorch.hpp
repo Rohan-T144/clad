@@ -1,8 +1,7 @@
 #ifndef CLAD_TENSOR_HPP_DYNAMIC
 #define CLAD_TENSOR_HPP_DYNAMIC
 
-#include <Accelerate/Accelerate.h> // For optimized math operations on Apple platforms
-
+#define ND __attribute__((annotate("non_differentiable")))
 #include "kernels.hpp" // Include kernel functions for operations
 #include <algorithm>
 #include <cassert>
@@ -126,6 +125,19 @@ public:
     }
     return *this;
   }
+  
+  // Tensor operator=(Tensor&& other) {
+  //   if (this != &other) {
+  //     delete[] _data;
+  //     _shape = std::move(other._shape);
+  //     _strides = std::move(other._strides);
+  //     _num_elements = other._num_elements;
+  //     _data = other._data;
+  //     other._num_elements = 0;
+  //     other._data = nullptr;
+  //   }
+  //   return *this;
+  // }
 
   // Move constructor
   Tensor(Tensor&& other) noexcept
@@ -136,7 +148,7 @@ public:
   }
 
   // Move assignment
-  Tensor& operator=(Tensor&& other) noexcept {
+  Tensor& operator=(Tensor&& other) {
     if (this != &other) {
       delete[] _data;
       _shape = std::move(other._shape);
@@ -153,7 +165,7 @@ public:
   const std::vector<int>& shape() const { return _shape; }
   int ndim() const { return _shape.size(); }
   int num_elements() const { return _num_elements; }
-  int size(int dim) const {
+  ND int size(int dim) const {
     CLAD_ASSERT(dim < _shape.size(), "Dimension index out of range.");
     return _shape[dim];
   }
@@ -225,11 +237,11 @@ public:
   }
 
   // Convenience for scalar tensors
-  T& scalar() {
-    CLAD_ASSERT(ndim() == 0, "scalar() is only for 0-dimension tensors.");
-    CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor.");
-    return _data[0];
-  }
+  // T& scalar() {
+  //   CLAD_ASSERT(ndim() == 0, "scalar() is only for 0-dimension tensors.");
+  //   CLAD_ASSERT(_data != nullptr, "Accessing null data in scalar tensor.");
+  //   return _data[0];
+  // }
 
   const T& scalar() const {
     CLAD_ASSERT(ndim() == 0, "scalar() is only for 0-dimension tensors.");
@@ -244,9 +256,7 @@ public:
     }
   }
 
-  void print(const std::string& title = "") const {
-    if (!title.empty())
-      std::cout << title;
+  void print() const {
     std::cout << " (Shape: [";
     for (int i = 0; i < _shape.size(); ++i)
       std::cout << _shape[i] << (i == _shape.size() - 1 ? "" : ", ");
@@ -281,7 +291,9 @@ public:
   }
 
   // Lookup operation: select slices from this tensor using indices
-  Tensor<T> lookup(const Tensor<int>& indices) const {
+  template <typename U>
+  Tensor<T> lookup(const Tensor<U>& indices) const {
+    static_assert(std::is_integral_v<U>, "Indices must be integral type.");
     CLAD_ASSERT(ndim() > 0, "Cannot lookup from a scalar tensor.");
     CLAD_ASSERT(_data != nullptr, "Cannot lookup from null data tensor.");
 
@@ -472,7 +484,9 @@ public:
   Tensor operator+(const Tensor& other) const {
     if (_shape == other._shape) {
       // Same shape, use optimized path
-      return Tensor(*this) += other;
+      Tensor<T> result(*this);
+      kernels::element_wise_add_kernel(_data, other._data, result._data, _num_elements);
+      return result;
     } else {
       // Different shapes, need broadcasting
       std::vector<int> result_shape = broadcast_shape(*this, other);
@@ -715,49 +729,57 @@ template <typename T> Tensor<T> causal_softmax(const Tensor<T>& input, int vocab
 }
 
 // Batched cross-entropy loss
-template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const std::vector<int>& targets) {
-  CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
-  int batch_size = probs.size(0);
-  int num_classes = probs.size(1);
-  CLAD_ASSERT(batch_size == targets.size(), "Batch size of probs and targets must match.");
-
-  float total_loss = 0.0f;
-  for (int i = 0; i < batch_size; ++i) {
-    const T* prob_slice = probs.data() + i * num_classes;
-    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets[i], num_classes);
+// template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const std::vector<int>& targets) {
+template <typename T, typename U> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, const Tensor<U>& targets) {
+  static_assert(std::is_integral_v<U>, "Targets tensor must contain integral class indices.");
+  // CLAD_ASSERT(targets.ndim() == 1, "Targets tensor must be a 1D array");
+  // CLAD_ASSERT(probs.ndim() == 2, "Probs tensor must be 2D for batched cross entropy loss.");
+  // int batch_size = probs.size(0);
+  for (int i = 0; i < targets.ndim(); ++i) {
+    CLAD_ASSERT(targets.size(i) == probs.size(i), "Targets tensor must be a (batched) array of class indices, with same previous dimensions as probs.");
   }
-  return Tensor<T>(total_loss / batch_size); // Return mean loss as a scalar tensor
+  int num_classes = probs.size(probs.ndim() - 1);
+  int batch_size = probs.num_elements() / num_classes;
+  CLAD_ASSERT(batch_size == targets.num_elements(), "Batch size of probs and targets must match.");
+
+  T total_loss = 0;
+  for (int i = 0; i < batch_size; ++i) {
+    const T* prob_slice = probs._data + i * num_classes;
+    total_loss += kernels::cross_entropy_loss_kernel(prob_slice, targets._data[i], num_classes);
+  }
+  auto ret = Tensor<T>::new_scalar(total_loss / batch_size);
+  return ret; // Return mean loss as a scalar tensor
 }
 
 // Single-instance cross-entropy loss
 template <typename T> Tensor<T> cross_entropy_loss(const Tensor<T>& probs, int target_class) {
   CLAD_ASSERT(probs.ndim() == 1, "Probs tensor must be 1D for single cross entropy loss.");
-  float loss_val = kernels::cross_entropy_loss_kernel(probs.data(), target_class, probs.num_elements());
+  T loss_val = kernels::cross_entropy_loss_kernel(probs.data(), target_class, probs.num_elements());
   return Tensor<T>::new_scalar(loss_val); // Return loss as a scalar tensor
 }
 
 template <typename T> Tensor<T> gelu(const Tensor<T>& in) {
-  Tensor<T> r(in.shape());
+  Tensor<T> r(in);
   for (int i = 0; i < in.num_elements(); ++i)
-    r.data()[i] = kernels::gelu_kernel(in.data()[i]);
+    r._data[i] = kernels::gelu_kernel(in._data[i]);
   return r;
 }
 
-template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) { return src.lookup(indices); }
+// template <typename T> Tensor<T> lookup(const Tensor<T>& src, const Tensor<int>& indices) { return src.lookup(indices); }
 
 template <typename T> Tensor<T> norm(const Tensor<T>& input) { return input.norm(); }
 
-template <typename T> std::vector<Tensor<T>> split(const Tensor<T>& input, int size, int axis) {
-  return input.split(size, axis);
-}
+// template <typename T> std::vector<Tensor<T>> split(const Tensor<T>& input, int size, int axis) {
+//   return input.split(size, axis);
+// }
 
-template <typename T> Tensor<T> transpose(const Tensor<T>& input, int dim0, int dim1) {
-  return input.transpose(dim0, dim1);
-}
+// template <typename T> Tensor<T> transpose(const Tensor<T>& input, int dim0, int dim1) {
+//   return input.transpose(dim0, dim1);
+// }
 
-template <typename T> Tensor<T> broadcast_to(const Tensor<T>& input, const std::vector<int>& target_shape) {
-  return input.broadcast_to(target_shape);
-}
+// template <typename T> Tensor<T> broadcast_to(const Tensor<T>& input, const std::vector<int>& target_shape) {
+//   return input.broadcast_to(target_shape);
+// }
 
 // Optimized linear layer function: input @ weight.T + bias
 template <typename T> 
@@ -765,7 +787,7 @@ Tensor<T> linear(const Tensor<T>& input, const Tensor<T>& weight, const Tensor<T
   static_assert(std::is_same_v<T, float>, "Linear operation currently only supports float tensors");
   
   // Validate input shapes
-  CLAD_ASSERT(input.ndim() >= 2, "Input must have at least 2 dimensions");
+  CLAD_ASSERT(input.ndim() >= 1, "Input must have at least 2 dimensions");
   CLAD_ASSERT(weight.ndim() == 2, "Weight must be 2-dimensional");
   CLAD_ASSERT(bias.ndim() == 1, "Bias must be 1-dimensional");
   

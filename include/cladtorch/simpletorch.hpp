@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace cladtorch {
+
 // -------------------- Dynamic-Shape Tensor Class --------------------
 template <typename T> class Tensor {
 public:
@@ -143,7 +144,7 @@ public:
   // }
 
   // Move constructor
-  // ND Tensor(Tensor&& other) noexcept
+  // Tensor(Tensor&& other) noexcept
   //     : _shape(std::move(other._shape)), _strides(std::move(other._strides)), _num_elements(other._num_elements),
   //       _data(other._data) {
   //   other._num_elements = 0;

@@ -3,8 +3,7 @@
 #include <clad/Differentiator/CladtorchBuiltins.h>
 #include <clad/Differentiator/Differentiator.h>
 #include <clad/Differentiator/STLBuiltins.h>
-#include <cladtorch/simpletorch.hpp>
-#include <iomanip>
+#include <cladtorch/cladtorch.hpp>
 #include "llmc/dataloader.h"
 
 using namespace gpt2;
@@ -43,7 +42,7 @@ int main() {
   GPT2 model("gpt2_124M.bin");
   const Config config = model.config;
 
-  int B = 1;
+  int B = 4;
   int T = 64;
 
   Tokenizer tokenizer("gpt2_tokenizer.bin");
@@ -73,72 +72,71 @@ int main() {
   auto grad = clad::gradient(gpt2_loss, "0");
   grad.dump(); // Dump the gradient function for debugging
 
-  dataloader_next_batch(&train_loader);
-  const ITensor input = ITensor({B, T}, train_loader.inputs);
-  const ITensor targets = ITensor({B, T}, train_loader.targets);
-  d_model.for_each_parameter([&](FTensor* t) { t->fill(0); }); // Zero out gradients
-  grad.execute(model, input, targets, &d_model);
+  // dataloader_next_batch(&train_loader);
+  // const ITensor input = ITensor({B, T}, train_loader.inputs);
+  // const ITensor targets = ITensor({B, T}, train_loader.targets);
+  // d_model.for_each_parameter([&](FTensor* t) { t->fill(0); }); // Zero out gradients
+  // grad.execute(model, input, targets, &d_model);
 
+  struct timespec start, end;
+  for (int step = 0; step <= 40; step++) {
+    // once in a while, estimate the validation loss
+    if (step % 10 == 0) {
+      float val_loss = 0.0f;
+      dataloader_reset(&val_loader);
+      for (int i = 0; i < val_num_batches; i++) {
+        dataloader_next_batch(&val_loader);
+        const ITensor input = ITensor({B, T}, val_loader.inputs);
+        const ITensor targets = ITensor({B, T}, val_loader.targets);
+        val_loss += gpt2_loss(model, input, targets);
+      }
+      val_loss /= val_num_batches;
+      std::cout << "val loss: " << val_loss << std::endl;
+    }
 
-  // struct timespec start, end;
-  // for (int step = 0; step <= 40; step++) {
-  //   // once in a while, estimate the validation loss
-  //   if (step % 10 == 0) {
-  //     float val_loss = 0.0f;
-  //     dataloader_reset(&val_loader);
-  //     for (int i = 0; i < val_num_batches; i++) {
-  //       dataloader_next_batch(&val_loader);
-  //       const ITensor input = ITensor({B, T}, val_loader.inputs);
-  //       const ITensor targets = ITensor({B, T}, val_loader.targets);
-  //       val_loss += gpt2_loss(model, input, targets);
-  //     }
-  //     val_loss /= val_num_batches;
-  //     std::cout << "val loss: " << val_loss << std::endl;
-  //   }
+    // once in a while do model inference to print generated text
+    if (step > 0 && step % 20 == 0) {
+      gen_tokens.fill(tokenizer.eot_token());
 
-  //   // once in a while do model inference to print generated text
-  //   if (step > 0 && step % 20 == 0) {
-  //     gen_tokens.fill(tokenizer.eot_token());
-
-  //     std::cout << "generating:\n---\n";
-  //     for (int t = 1; t < gen_max_length; t++) {
-  //       auto probs_t = model.forward(gen_tokens);
-  //       float* probs = new float[config.padded_vocab_size];
-  //       for (int v = 0; v < config.padded_vocab_size; v++)
-  //         probs[v] = probs_t.at(0, t - 1, v); // Get probabilities for the first batch
+      std::cout << "generating:\n---\n";
+      for (int t = 1; t < gen_max_length; t++) {
+        auto probs_t = model.forward(gen_tokens);
+        float* probs = new float[config.padded_vocab_size];
+        for (int v = 0; v < config.padded_vocab_size; v++)
+          probs[v] = probs_t.at(0, t - 1, v); // Get probabilities for the first batch
     
-  //       float coin = random_f32(&rng_state);
-  //       int next_token = sample_mult(probs, model.config.vocab_size, coin);
-  //       gen_tokens.at(0, t) = next_token; // Use the first batch for generation
-  //       delete[] probs;
+        float coin = random_f32(&rng_state);
+        int next_token = sample_mult(probs, model.config.vocab_size, coin);
+        gen_tokens.at(0, t) = next_token; // Use the first batch for generation
+        delete[] probs;
 
-  //       if (tokenizer.is_initialized()) {
-  //         tokenizer.safe_print(next_token);
-  //       } else {
-  //         std::cout << next_token << " ";
-  //       }
-  //       std::cout << std::flush;
-  //     }
-  //     std::cout << "\n---\n";
-  //   }
+        if (tokenizer.is_initialized()) {
+          tokenizer.safe_print(next_token);
+        } else {
+          std::cout << next_token << " ";
+        }
+        std::cout << std::flush;
+      }
+      std::cout << "\n---\n";
+    }
 
-  //   // do a training step
-  //   clock_gettime(CLOCK_MONOTONIC, &start);
-  //   dataloader_next_batch(&train_loader);
-  //   const ITensor input = ITensor({B, T}, train_loader.inputs);
-  //   const ITensor targets = ITensor({B, T}, train_loader.targets);
+    // do a training step
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    dataloader_next_batch(&train_loader);
+    const ITensor input = ITensor({B, T}, train_loader.inputs);
+    const ITensor targets = ITensor({B, T}, train_loader.targets);
 
-  //   auto mean_loss = gpt2_loss(model, input, targets);
-  //   d_model.for_each_parameter([&](FTensor* t) { t->fill(0); }); // Zero out gradients
-  //   grad.execute(model, input, targets, &d_model);
-  //   std::vector<FTensor*> params = model.get_parameter_tensors();
-  //   std::vector<FTensor*> grads = d_model.get_parameter_tensors();
-  //   for (size_t i = 0; i < params.size(); ++i) {
-  //     *params[i] += (*grads[i]) * -1e-4f; // Update parameters with a learning rate of 1e-4
-  //   }
-  //   clock_gettime(CLOCK_MONOTONIC, &end);
-  //   double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-  //   std::cout << "step " << step << " train Loss: " << mean_loss << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;
-  //   // std::cout << "step " << step << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;
-  // }
+    auto mean_loss = gpt2_loss(model, input, targets);
+    d_model.for_each_parameter([&](FTensor* t) { t->fill(0); }); // Zero out gradients
+    grad.execute(model, input, targets, &d_model);
+    std::vector<FTensor*> params = model.get_parameter_tensors();
+    std::vector<FTensor*> grads = d_model.get_parameter_tensors();
+    for (size_t i = 0; i < params.size(); ++i) {
+      *params[i] += (*grads[i]) * -1e-4f; // Update parameters with a learning rate of 1e-4
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    std::cout << "step " << step << " train Loss: " << mean_loss << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;
+    // std::cout << "step " << step << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;
+  }
 }

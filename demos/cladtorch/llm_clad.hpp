@@ -6,7 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
-#include <cladtorch/simpletorch.hpp>
+#include <cladtorch/cladtorch.hpp>
 
 namespace gpt2 {
 
