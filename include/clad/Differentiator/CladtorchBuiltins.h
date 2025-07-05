@@ -602,28 +602,8 @@ template <typename T>
 clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
 operator_equal_pushforward(::cladtorch::Tensor<T>* a, const ::cladtorch::Tensor<T>& param, ::cladtorch::Tensor<T>* d_a,
                            const ::cladtorch::Tensor<T>& d_param) {
-  if (a != &param) {
-    delete[] a->_data; // Free existing data
-    a->_shape = param._shape;
-    a->_strides = param._strides;
-    a->_num_elements = param._num_elements;
-    a->_data = nullptr;
-    if (a->_num_elements > 0) {
-      a->_data = new T[a->_num_elements];
-      ::std::copy(param._data, param._data + a->_num_elements, a->_data);
-    }
-  }
-  if (d_a != &d_param) {
-    delete[] d_a->_data; // Free existing data
-    d_a->_shape = d_param._shape;
-    d_a->_strides = d_param._strides;
-    d_a->_num_elements = d_param._num_elements;
-    d_a->_data = nullptr;
-    if (d_a->_num_elements > 0) {
-      d_a->_data = new T[d_a->_num_elements];
-      ::std::copy(d_param._data, d_param._data + d_a->_num_elements, d_a->_data);
-    }
-  }
+  *a = param;
+  *d_a = d_param;
   return {*a, *d_a};
 }
 
@@ -672,6 +652,22 @@ constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const
 
 template <typename T>
 void constructor_pullback(const ::cladtorch::Tensor<T>& other, ::cladtorch::Tensor<T>* _d_this,
+                          ::cladtorch::Tensor<T>* _d_other) {
+  *_d_other += *_d_this;
+  _d_this->fill(0);
+}
+
+template <typename T>
+clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
+constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, ::cladtorch::Tensor<T>&& p,
+                        ::cladtorch::Tensor<T>&& d_p) {
+  ::cladtorch::Tensor<T> v(::std::move(p));
+  ::cladtorch::Tensor<T> d_v(::std::move(d_p));
+  return {v, d_v};
+}
+
+template <typename T>
+void constructor_pullback(::cladtorch::Tensor<T>&& other, ::cladtorch::Tensor<T>* _d_this,
                           ::cladtorch::Tensor<T>* _d_other) {
   *_d_other += *_d_this;
   _d_this->fill(0);

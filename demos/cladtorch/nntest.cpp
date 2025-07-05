@@ -9,7 +9,7 @@
 #include <clad/Differentiator/Differentiator.h>
 #include <clad/Differentiator/STLBuiltins.h>
 #include <clad/Differentiator/CladtorchBuiltins.h>
-#include <cladtorch/simpletorch.hpp>
+#include <cladtorch/cladtorch.hpp>
 
 using namespace std;
 

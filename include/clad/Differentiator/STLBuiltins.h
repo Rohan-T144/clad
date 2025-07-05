@@ -146,6 +146,16 @@ constructor_pushforward(ConstructorPushforwardTag<::std::vector<T>>,
 }
 
 template <typename T>
+clad::ValueAndPushforward<::std::vector<T>, ::std::vector<T>>
+constructor_pushforward(ConstructorPushforwardTag<::std::vector<T>>,
+                        ::std::vector<T> &&list,
+                        ::std::vector<T> &&dlist) {
+  ::std::vector<T> v(::std::move(list));
+  ::std::vector<T> d_v(::std::move(dlist));
+  return {v, d_v};
+}
+
+template <typename T>
 ValueAndPushforward<T&, T&> operator_subscript_pushforward(
     ::std::vector<T>* v, typename ::std::vector<T>::size_type idx,
     ::std::vector<T>* d_v, typename ::std::vector<T>::size_type d_idx) {

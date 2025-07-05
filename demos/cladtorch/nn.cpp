@@ -62,7 +62,7 @@ struct NeuralNetwork {
     l2.update_weights(d_nn.l2, learning_rate);
   }
   // Forward pass for prediction
-  FTensor forward(const FTensor& input) const { return softmax(l2.forward(l1.forward(input))); }
+  FTensor forward(const FTensor& input) const { return softmax(l2.forward(l1.forward(input)), false, 0); }
 };
 
 // Loss function for the neural network

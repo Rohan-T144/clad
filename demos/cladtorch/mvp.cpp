@@ -1,7 +1,7 @@
 #include <clad/Differentiator/Differentiator.h>
 #include <clad/Differentiator/STLBuiltins.h>
 #include <clad/Differentiator/CladtorchBuiltins.h>
-#include <cladtorch/simpletorch.hpp>
+#include <cladtorch/cladtorch.hpp>
 using namespace cladtorch;
 using FTensor = Tensor<float>;
 
@@ -27,7 +27,7 @@ float add(const layer &l, FTensor a, FTensor b) {
   auto db = b * 0.7;
   auto res = da + db;
   auto res2 = l.forward(res);
-  return res2._data[0];
+  return res2.scalar();
 }
 
 int main() {
