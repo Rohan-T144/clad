@@ -1,10 +1,10 @@
-#include "llm_clad.hpp"
+#include "llm.hpp"
 #include "tokenizer.hpp"
 #include <clad/Differentiator/CladtorchBuiltins.h>
 #include <clad/Differentiator/Differentiator.h>
 #include <clad/Differentiator/STLBuiltins.h>
 #include <cladtorch/cladtorch.hpp>
-#include "llmc/dataloader.h"
+#include "dataloader.hpp"
 
 using namespace gpt2;
 
@@ -53,13 +53,11 @@ int main() {
       "/Users/rohan/Developer/projects/gsoc25/workspace/ml/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
   const std::string& train_token = tiny_shakespeare_train;
   const std::string& val_token = tiny_shakespeare_val;
+  DataLoader train_loader(train_token, B, T, 0, 1, true);
+  DataLoader val_loader(val_token, B, T, 0, 1, false);
 
-  DataLoader train_loader, val_loader;
-  dataloader_init(&train_loader, train_token.c_str(), B, T, 0, 1, 1);
-  dataloader_init(&val_loader, val_token.c_str(), B, T, 0, 1, 0);
-
-  std::cout << "train dataset num_batches: " << train_loader.num_tokens / (B * T) << std::endl;
-  std::cout << "val dataset num_batches: " << val_loader.num_tokens / (B * T) << std::endl;
+  std::cout << "train dataset num_batches: " << train_loader.num_tokens() / (B * T) << std::endl;
+  std::cout << "val dataset num_batches: " << val_loader.num_tokens() / (B * T) << std::endl;
   int val_num_batches = 5;
 
   uint64_t rng_state = 1337;
@@ -83,11 +81,11 @@ int main() {
     // once in a while, estimate the validation loss
     if (step % 10 == 0) {
       float val_loss = 0.0f;
-      dataloader_reset(&val_loader);
+      val_loader.reset(); // Reset the validation loader to start from the beginning
       for (int i = 0; i < val_num_batches; i++) {
-        dataloader_next_batch(&val_loader);
-        const ITensor input = ITensor({B, T}, val_loader.inputs);
-        const ITensor targets = ITensor({B, T}, val_loader.targets);
+        val_loader.next_batch();
+        const ITensor input = ITensor({B, T}, val_loader.inputs());
+        const ITensor targets = ITensor({B, T}, val_loader.targets());
         val_loss += gpt2_loss(model, input, targets);
       }
       val_loss /= val_num_batches;
@@ -121,11 +119,11 @@ int main() {
     }
 
     // do a training step
+    train_loader.next_batch();
+    const ITensor input = ITensor({B, T}, train_loader.inputs());
+    const ITensor targets = ITensor({B, T}, train_loader.targets());
+    
     clock_gettime(CLOCK_MONOTONIC, &start);
-    dataloader_next_batch(&train_loader);
-    const ITensor input = ITensor({B, T}, train_loader.inputs);
-    const ITensor targets = ITensor({B, T}, train_loader.targets);
-
     auto mean_loss = gpt2_loss(model, input, targets);
     d_model.for_each_parameter([&](FTensor* t) { t->fill(0); }); // Zero out gradients
     grad.execute(model, input, targets, &d_model);
@@ -135,6 +133,7 @@ int main() {
       *params[i] += (*grads[i]) * -1e-4f; // Update parameters with a learning rate of 1e-4
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
+    
     double time_elapsed_s = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
     std::cout << "step " << step << " train Loss: " << mean_loss << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;
     // std::cout << "step " << step << " (took " << time_elapsed_s * 1000 << " ms)" << std::endl;

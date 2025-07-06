@@ -6,13 +6,13 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
-#include "cladtorch/cladtorch.hpp"
+#include <cladtorch/cladtorch.hpp>
 
 namespace gpt2 {
 
-using namespace cladtorch;
-using FTensor = Tensor<float>;
-using ITensor = Tensor<int>;
+namespace ct = cladtorch;
+using FTensor = ct::Tensor<float>;
+using ITensor = ct::Tensor<int>;
 
 struct Config {
   int max_seq_len;
@@ -30,14 +30,22 @@ class Linear {
 public:
   FTensor weight, bias;
   Linear(int in_features, int out_features) : weight({out_features, in_features}), bias({out_features}) {}
-  FTensor forward(const FTensor& input) const { return linear(input, weight, bias); }
+  FTensor forward(const FTensor& input) const { 
+    auto linear_out = linear(input, weight, bias);
+    return linear_out;
+  }
 };
 
 class LayerNorm {
 public:
   FTensor weight, bias;
   explicit LayerNorm(int channels) : weight({channels}), bias({channels}) {}
-  FTensor forward(const FTensor& input) const { return input.norm() * weight + bias; }
+  FTensor forward(const FTensor& input) const { 
+    auto norm_out = input.norm();
+    auto weighted = norm_out * weight;
+    auto result = weighted + bias;
+    return result;
+  }
 };
 
 class Encoder {
@@ -46,7 +54,10 @@ public:
   Encoder(int padded_vocab_size, int max_seq_len, int channels)
       : wte({padded_vocab_size, channels}), wpe({max_seq_len, channels}) {}
   FTensor forward(const ITensor& input, const ITensor& input_pos) const {
-    return wte.lookup(input) + wpe.lookup(input_pos);
+    auto token_embeddings = wte.lookup(input);
+    auto position_embeddings = wpe.lookup(input_pos);
+    auto embeddings = token_embeddings + position_embeddings;
+    return embeddings;
   }
 };
 
@@ -62,26 +73,42 @@ public:
   }
 
   FTensor forward(const FTensor& input) const {
-    const auto& shape = input.shape();
-    const int B = shape[0];
-    const int T = shape[1];
+    const int B = input.size(0);
+    const int T = input.size(1);
+    std::vector<int> qkv_shape(4);
+    qkv_shape[0] = B; // Batch size
+    qkv_shape[1] = T; // Sequence length
+    qkv_shape[2] = num_heads; // Number of heads
+    qkv_shape[3] = head_size; // Head size
+    std::vector<int> reshaped_shape(3);
+    reshaped_shape[0] = B; // Batch size
+    reshaped_shape[1] = T; // Sequence length
+    reshaped_shape[2] = channels; // Channels
+    // const std::vector<int> qkv_shape{{B, T, num_heads, head_size}};
 
     // Compute Q, K, V
     auto qkv_out = qkv.forward(input);
     auto qkv_split = qkv_out.split(channels, 2);
-    auto q = qkv_split[0].reshape({B, T, num_heads, head_size}).transpose(1, 2);
-    auto k = qkv_split[1].reshape({B, T, num_heads, head_size}).transpose(1, 2);
-    auto v = qkv_split[2].reshape({B, T, num_heads, head_size}).transpose(1, 2);
+    auto q_reshaped = qkv_split[0].reshape(qkv_shape);
+    auto q = q_reshaped.transpose(1, 2);
+    auto k_reshaped = qkv_split[1].reshape(qkv_shape);
+    auto k = k_reshaped.transpose(1, 2);
+    auto v_reshaped = qkv_split[2].reshape(qkv_shape);
+    auto v = v_reshaped.transpose(1, 2);
 
     // Attention computation
     const float scale = 1.0F / std::sqrt(static_cast<float>(head_size));
-    auto scores = matmul(q, k.transpose(2, 3)) * scale;
+    auto k_transposed = k.transpose(2, 3);
+    auto scores_raw = matmul(q, k_transposed);
+    auto scores = scores_raw * scale;
     auto weights = softmax(scores, true, 0);
-    auto out = matmul(weights, v);
+    auto attention_out = matmul(weights, v);
 
     // Reshape and project
-    out = out.transpose(1, 2).reshape({B, T, channels});
-    return proj.forward(out);
+    auto transposed = attention_out.transpose(1, 2);
+    auto reshaped = transposed.reshape(reshaped_shape);
+    auto projected = proj.forward(reshaped);
+    return projected;
   }
 };
 
@@ -91,18 +118,39 @@ public:
   CausalSelfAttention attn;
   LayerNorm ln2;
   Linear mlp_fc, mlp_proj;
-
+  inline static int nh = 0, ch = 0;
   Block(int num_heads, int channels)
       : ln1(channels), attn(num_heads, channels), ln2(channels), mlp_fc(channels, 4 * channels),
-        mlp_proj(4 * channels, channels) {}
-
+        mlp_proj(4 * channels, channels) { nh = num_heads; ch = channels; }
+  
+  Block() : ln1(ch), attn(nh, ch), ln2(ch), mlp_fc(ch, 4 * ch), mlp_proj(4 * ch, ch) {}
   FTensor forward(const FTensor& input) const {
     // Attention block with residual connection
-    auto x = input + attn.forward(ln1.forward(input));
+    auto ln1_out = ln1.forward(input);
+    auto attn_out = attn.forward(ln1_out);
+    auto x = input + attn_out;
 
     // MLP block with residual connection
-    auto mlp_out = mlp_proj.forward(gelu(mlp_fc.forward(ln2.forward(x))));
-    return x + mlp_out;
+    auto ln2_out = ln2.forward(x);
+    auto mlp_fc_out = mlp_fc.forward(ln2_out);
+    auto gelu_out = gelu(mlp_fc_out);
+    auto mlp_proj_out = mlp_proj.forward(gelu_out);
+    auto result = x + mlp_proj_out;
+    return result;
+  }
+  void operator+=(const Block& other) {
+    ln1.weight += other.ln1.weight;
+    ln1.bias += other.ln1.bias;
+    attn.qkv.weight += other.attn.qkv.weight;
+    attn.qkv.bias += other.attn.qkv.bias;
+    attn.proj.weight += other.attn.proj.weight;
+    attn.proj.bias += other.attn.proj.bias;
+    ln2.weight += other.ln2.weight;
+    ln2.bias += other.ln2.bias;
+    mlp_fc.weight += other.mlp_fc.weight;
+    mlp_fc.bias += other.mlp_fc.bias;
+    mlp_proj.weight += other.mlp_proj.weight;
+    mlp_proj.bias += other.mlp_proj.bias;
   }
 };
 
@@ -121,9 +169,13 @@ public:
 
   FTensor forward(const ITensor& input, const ITensor& input_pos) const {
     auto x = encoder.forward(input, input_pos);
-    for (const auto& block : blocks)
-      x = block.forward(x);
-    return ln_f.forward(x);
+    // for (const auto& block : blocks) {
+    for (int i=0;i<blocks.size();i++) {
+      auto block_out = blocks[i].forward(x);
+      x = block_out;
+    }
+    auto final_norm = ln_f.forward(x);
+    return final_norm;
   }
 };
 
@@ -132,7 +184,7 @@ private:
   static constexpr int MAGIC_NUMBER = 20240326;
   static constexpr int VERSION = 3;
   static constexpr int HEADER_SIZE = 256;
-
+public:
   template <typename Func> void for_each_parameter(Func func) {
     // Embedding parameters
     func(&transformer.encoder.wte);
@@ -168,7 +220,7 @@ private:
     func(&transformer.ln_f.weight);
     func(&transformer.ln_f.bias);
   }
-
+private:
   static Config read_config_from_file(FILE* file) {
     int header[HEADER_SIZE];
     if (fread(header, sizeof(int), HEADER_SIZE, file) != HEADER_SIZE)
@@ -218,19 +270,20 @@ public:
   }
 
   FTensor forward(const ITensor& input) const {
-    const auto& shape = input.shape();
-    const int B = shape[0];
-    const int T = shape[1];
-
-    // Create position indices
-    ITensor input_pos({B, T});
+    const int B = input.size(0);
+    const int T = input.size(1);
+    const std::vector<int> input_pos_shape{{B, T}};
+    ITensor input_pos(input_pos_shape); // Create position indices
     for (int b = 0; b < B; ++b)
       for (int t = 0; t < T; ++t)
-        input_pos.at(b, t) = t;
+        input_pos._data[b * T + t] = t; // Fill with sequential positions 0, 1, ..., T-1 for each batch
+        // input_pos.at(b, t) = t;
 
     auto hidden = transformer.forward(input, input_pos);
-    auto logits = matmul(hidden, transformer.encoder.wte.transpose(0, 1));
-    return softmax(logits, false, config.vocab_size);
+    auto weight_transposed = transformer.encoder.wte.transpose(0, 1);
+    auto logits = matmul(hidden, weight_transposed);
+    auto probabilities = softmax(logits, false, config.vocab_size);
+    return probabilities;
   }
 
   std::vector<FTensor*> get_parameter_tensors() {
