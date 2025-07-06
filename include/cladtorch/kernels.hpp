@@ -74,9 +74,9 @@ inline void mat_vec_mul_kernel(const float* mat, const float* vec, float* result
   }
 }
 
-inline void mat_mul_kernel_naive(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1,
-                                 size_t C2) {
-  #pragma omp parallel for
+inline void
+mat_mul_kernel_naive(const float* a_data, const float* b_data, float* result_data, size_t R, size_t C1, size_t C2) {
+#pragma omp parallel for
   for (size_t i = 0; i < R; ++i) {
     for (size_t j = 0; j < C2; ++j) {
       float sum = 0.0f;
@@ -91,7 +91,7 @@ static constexpr int UNROLL = 8;
 inline void mat_mul_kernel_unrolled(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
   // we assume R % UNROLL == 0 (fall back otherwise)
   size_t RT = R; // R = B*T for us
-  #pragma omp parallel for
+#pragma omp parallel for
   for (size_t r0 = 0; r0 < RT; r0 += UNROLL) {
     for (size_t j = 0; j < C2; ++j) {
       // roll UNROLL outputs into registers
@@ -116,20 +116,21 @@ inline void mat_mul_kernel_unrolled(const float* a, const float* b, float* out, 
 }
 
 inline void mat_mul_kernel(const float* a, const float* b, float* out, size_t R, size_t C1, size_t C2) {
-  // Dispatch to unrolled or regular kernel based on R
-  #ifdef __APPLE__
+// Dispatch to unrolled or regular kernel based on R
+#ifdef __APPLE__
   // Use Accelerate framework for unrolled matrix multiplication
   cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, R, C2, C1, 1.0f, a, C1, b, C2, 0.0f, out, C2);
   return;
-  #endif
+#endif
   if (R % UNROLL == 0)
     mat_mul_kernel_unrolled(a, b, out, R, C1, C2);
   else
     mat_mul_kernel_naive(a, b, out, R, C1, C2);
 }
 
-inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, float* result_data, size_t batch_size,
-                                   size_t R, size_t C1, size_t C2) {
+inline void batched_mat_mul_kernel(
+  const float* a_data, const float* b_data, float* result_data, size_t batch_size, size_t R, size_t C1, size_t C2
+) {
   size_t a_batch_stride = R * C1;
   size_t b_batch_stride = C1 * C2;
   size_t result_batch_stride = R * C2;
@@ -144,45 +145,46 @@ inline void batched_mat_mul_kernel(const float* a_data, const float* b_data, flo
 
 // -------------------- Linear Layer Kernels (Fused Matrix Multiplication + Bias) --------------------
 
-inline void linear_kernel_naive(const float* input, const float* weight, const float* bias, float* output,
-                                 size_t batch_seq, size_t in_features, size_t out_features) {
+inline void linear_kernel_naive(
+  const float* input, const float* weight, const float* bias, float* output, size_t batch_seq, size_t in_features,
+  size_t out_features
+) {
   // input: [batch_seq, in_features]
-  // weight: [out_features, in_features] 
+  // weight: [out_features, in_features]
   // bias: [out_features]
   // output: [batch_seq, out_features]
   // Computes: output = input @ weight.T + bias
-  
-  #pragma omp parallel for
+
+#pragma omp parallel for
   for (size_t i = 0; i < batch_seq; ++i) {
     for (size_t j = 0; j < out_features; ++j) {
       float sum = bias[j]; // Start with bias
-      for (size_t k = 0; k < in_features; ++k) {
+      for (size_t k = 0; k < in_features; ++k)
         sum += input[i * in_features + k] * weight[j * in_features + k];
-      }
       output[i * out_features + j] = sum;
     }
   }
 }
 template <typename T>
-inline void linear_kernel_unrolled(const T* input, const T* weight, const T* bias, T* output,
-                                   size_t batch_seq, size_t in_features, size_t out_features) {
-  // Unrolled version for better performance when batch_seq % UNROLL == 0
-  #pragma omp parallel for
+inline void linear_kernel_unrolled(
+  const T* input, const T* weight, const T* bias, T* output, size_t batch_seq, size_t in_features, size_t out_features
+) {
+// Unrolled version for better performance when batch_seq % UNROLL == 0
+#pragma omp parallel for
   for (size_t i0 = 0; i0 < batch_seq; i0 += UNROLL) {
     for (size_t j = 0; j < out_features; ++j) {
       // Initialize registers with bias
       float regs[UNROLL];
       for (int u = 0; u < UNROLL; ++u)
         regs[u] = bias[j];
-      
+
       // Accumulate input * weight for each output feature
       for (size_t k = 0; k < in_features; ++k) {
         float w = weight[j * in_features + k];
-        for (int u = 0; u < UNROLL; ++u) {
+        for (int u = 0; u < UNROLL; ++u)
           regs[u] += input[(i0 + u) * in_features + k] * w;
-        }
       }
-      
+
       // Write back results
       for (int u = 0; u < UNROLL; ++u)
         output[(i0 + u) * out_features + j] = regs[u];
@@ -190,23 +192,24 @@ inline void linear_kernel_unrolled(const T* input, const T* weight, const T* bia
   }
 }
 
-inline void linear_kernel(const float* input, const float* weight, const float* bias, float* output,
-                          size_t batch_seq, size_t in_features, size_t out_features) {
-  #ifdef __APPLE__
-  // 1) Broadcast the bias into each row of `output`
-  //    output[i, j] = bias[j]
-  #pragma omp parallel for
+inline void linear_kernel(
+  const float* input, const float* weight, const float* bias, float* output, size_t batch_seq, size_t in_features,
+  size_t out_features
+) {
+#ifdef __APPLE__
+// 1) Broadcast the bias into each row of `output`
+//    output[i, j] = bias[j]
+#pragma omp parallel for
   for (size_t i = 0; i < batch_seq; ++i) {
     float* out_row = output + i * out_features;
-    for (size_t j = 0; j < out_features; ++j) {
+    for (size_t j = 0; j < out_features; ++j)
       out_row[j] = bias[j];
-    }
   }
   // 2) Compute output += input @ weight^T
   //
   // In BLAS terms (row-major):
   //   C := α·A·Bᵀ + β·C
-  // 
+  //
   // A = input        (batch_seq × in_features)
   // B = weight       (out_features × in_features)
   // Bᵀ = weightᵀ    (in_features × out_features)
@@ -219,47 +222,43 @@ inline void linear_kernel(const float* input, const float* weight, const float* 
     /* transB    */ CblasTrans,
     /* M,N,K     */ (int)batch_seq, (int)out_features, (int)in_features,
     /* α         */ 1.0f,
-    /* A, lda    */ input,  (int)in_features,
+    /* A, lda    */ input, (int)in_features,
     /* B, ldb    */ weight, (int)in_features,
-    /* β, C, ldc */ 1.0f,   output, (int)out_features
+    /* β, C, ldc */ 1.0f, output, (int)out_features
   );
-  #endif
+#endif
   // Dispatch to unrolled or regular kernel based on batch_seq
   if (batch_seq % UNROLL == 0 && batch_seq >= UNROLL)
     linear_kernel_unrolled(input, weight, bias, output, batch_seq, in_features, out_features);
   else
     linear_kernel_naive(input, weight, bias, output, batch_seq, in_features, out_features);
 }
-template<typename T>
-inline void element_wise_add_kernel(const T* a, const T* b, T* r, size_t n) {
+template <typename T> inline void element_wise_add_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] + b[i];
 }
-template<typename T>
-inline void element_wise_sub_kernel(const T* a, const T* b, T* r, size_t n) {
+template <typename T> inline void element_wise_sub_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] - b[i];
 }
-template<typename T>
-inline void element_wise_mul_kernel(const T* a, const T* b, T* r, size_t n) {
+template <typename T> inline void element_wise_mul_kernel(const T* a, const T* b, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] * b[i];
 }
-template<typename T>
-inline void scalar_mul_kernel(const T* in, T s, T* r, size_t n) {
+template <typename T> inline void scalar_mul_kernel(const T* in, T s, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = in[i] * s;
 }
-template<typename T>
-inline void scalar_div_kernel(const T* in, T s, T* r, size_t n) {
+template <typename T> inline void scalar_div_kernel(const T* in, T s, T* r, size_t n) {
   CLAD_ASSERT(s != 0.0f, "Division by zero.");
   for (size_t i = 0; i < n; ++i)
     r[i] = in[i] / s;
 }
 
 template <typename T>
-inline void lookup_kernel(const T* src_data, const int* indices, T* dst_data, size_t num_indices, size_t src_first_dim,
-                          size_t slice_size) {
+inline void lookup_kernel(
+  const T* src_data, const int* indices, T* dst_data, size_t num_indices, size_t src_first_dim, size_t slice_size
+) {
   for (size_t i = 0; i < num_indices; ++i) {
     int idx = indices[i];
     CLAD_ASSERT(idx >= 0 && idx < (int)src_first_dim, "Index out of bounds in lookup.");
@@ -273,9 +272,10 @@ inline void lookup_kernel(const T* src_data, const int* indices, T* dst_data, si
 }
 
 template <typename T>
-inline void view_kernel(const T* src_data, T* dst_data, const std::vector<int>& src_shape,
-                        const std::vector<int>& src_strides, const std::vector<int>& dst_shape,
-                        const std::vector<int>& dst_strides, size_t split_axis, size_t offset) {
+inline void view_kernel(
+  const T* src_data, T* dst_data, const std::vector<int>& src_shape, const std::vector<int>& src_strides,
+  const std::vector<int>& dst_shape, const std::vector<int>& dst_strides, size_t split_axis, size_t offset
+) {
   size_t dst_elements = 1;
   for (size_t dim : dst_shape)
     dst_elements *= dim;
@@ -303,9 +303,10 @@ inline void view_kernel(const T* src_data, T* dst_data, const std::vector<int>& 
 }
 
 template <typename T>
-inline void transpose_kernel(const T* src_data, T* dst_data, const std::vector<int>& src_shape,
-                             const std::vector<int>& src_strides, const std::vector<int>& dst_strides, size_t dim0,
-                             size_t dim1) {
+inline void transpose_kernel(
+  const T* src_data, T* dst_data, const std::vector<int>& src_shape, const std::vector<int>& src_strides,
+  const std::vector<int>& dst_strides, size_t dim0, size_t dim1
+) {
   size_t total_elements = 1;
   for (size_t dim : src_shape)
     total_elements *= dim;
@@ -364,9 +365,10 @@ inline void norm_kernel(const float* src_data, float* dst_data, size_t num_vecto
 }
 
 template <typename T>
-inline void broadcast_kernel(const T* src_data, T* dst_data, const std::vector<int>& src_shape,
-                             const std::vector<int>& src_strides, const std::vector<int>& dst_shape,
-                             const std::vector<int>& dst_strides) {
+inline void broadcast_kernel(
+  const T* src_data, T* dst_data, const std::vector<int>& src_shape, const std::vector<int>& src_strides,
+  const std::vector<int>& dst_shape, const std::vector<int>& dst_strides
+) {
   size_t total_elements = 1;
   for (int dim : dst_shape)
     total_elements *= dim;
@@ -399,10 +401,11 @@ inline void broadcast_kernel(const T* src_data, T* dst_data, const std::vector<i
 }
 
 template <typename T>
-inline void broadcast_add_kernel(const T* a_data, const T* b_data, T* result_data, const std::vector<int>& a_shape,
-                                 const std::vector<int>& a_strides, const std::vector<int>& b_shape,
-                                 const std::vector<int>& b_strides, const std::vector<int>& result_shape,
-                                 const std::vector<int>& result_strides) {
+inline void broadcast_add_kernel(
+  const T* a_data, const T* b_data, T* result_data, const std::vector<int>& a_shape, const std::vector<int>& a_strides,
+  const std::vector<int>& b_shape, const std::vector<int>& b_strides, const std::vector<int>& result_shape,
+  const std::vector<int>& result_strides
+) {
   size_t total_elements = 1;
   for (int dim : result_shape)
     total_elements *= dim;

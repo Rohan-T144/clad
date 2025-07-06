@@ -1,4 +1,3 @@
-// #include <clad/Differentiator/STLBuiltins.h>
 #include <clad/Differentiator/Array.h>
 #include <clad/Differentiator/BuiltinDerivatives.h>
 #include <clad/Differentiator/FunctionTraits.h>
@@ -312,73 +311,6 @@ inline void linear_kernel_unrolled_pullback(const float* input, const float* wei
       d_weight[j * in_features + k] += local_dw[k];
   }
 }
-#ifdef __APPLE__
-inline void linear_kernel_blas_pullback(
-    const float* input,        // [B, I]
-    const float* weight,       // [O, I]   (row-major)
-    const float* /*bias*/,     // unused for gradients
-    size_t        B,           // batch_seq
-    size_t        I,           // in_features
-    size_t        O,           // out_features
-    const float*  d_output,    // [B, O]
-    float*        d_input,     // [B, I]   (+=)
-    float*        d_weight,    // [O, I]   (+=)
-    float*        d_bias       // [O]      (+=)
-)
-{
-    const float alpha = 1.0f;
-    const float beta  = 1.0f;   // accumulate (+=) exactly like the naive code
-    /* ------------------------------------------------------------------ *
-     * 1) d_input  +=  d_output · weight                                  *
-     *    Shapes: (B,O) · (O,I)  -> (B,I)                                 *
-     * ------------------------------------------------------------------ */
-    cblas_sgemm(
-        CblasRowMajor,          // matrices are row-major
-        CblasNoTrans,           // op(A) = d_output
-        CblasNoTrans,           // op(B) = weight
-        (int)B, (int)I, (int)O, // M, N, K
-        alpha,
-        d_output, (int)O,       // A, lda
-        weight,   (int)I,       // B, ldb
-        beta,
-        d_input,  (int)I        // C, ldc
-    );
-
-    /* ------------------------------------------------------------------ *
-     * 2) d_weight += d_outputᵀ · input                                   *
-     *    Shapes: (O,B) · (B,I) -> (O,I)                                  *
-     * ------------------------------------------------------------------ */
-    cblas_sgemm(
-        CblasRowMajor,
-        CblasTrans,             // op(A) = d_outputᵀ
-        CblasNoTrans,           // op(B) = input
-        (int)O, (int)I, (int)B, // M, N, K
-        alpha,
-        d_output, (int)O,       // A, lda
-        input,    (int)I,       // B, ldb
-        beta,
-        d_weight, (int)I        // C, ldc
-    );
-
-    /* ------------------------------------------------------------------ *
-     * 3) d_bias  +=  Σ_i d_output[i , :]  (row-sum across batch)         *
-     *    This is a GEMV with a length-B vector of all 1’s.               *
-     * ------------------------------------------------------------------ */
-    static thread_local ::std::vector<float> ones;   // reused per thread
-    if (ones.size() < B) ones.assign(B, 1.0f);     // ensure length ≥ B
-
-    cblas_sgemv(
-        CblasRowMajor,
-        CblasTrans,             // we want d_outputᵀ · ones
-        (int)B, (int)O,         // rows, cols of d_output
-        alpha,
-        d_output, (int)O,       // A, lda
-        ones.data(), 1,         // x, incx
-        beta,
-        d_bias,      1          // y, incy
-    );
-}
-#endif
 
 // Linear kernel pullback dispatcher
 void linear_kernel_pullback(const float* input, const float* weight, const float* bias, float* output, size_t batch_seq,
@@ -425,24 +357,6 @@ void linear_pullback(const ::cladtorch::Tensor<T>& input, const ::cladtorch::Ten
 
 } // namespace cladtorch
 namespace class_functions {
-
-// Custom derivatives for cladtorch Tensor operations
-// template <typename T>
-// Tensor& operator=(const Tensor& other) {
-//   if (this != &other) {
-//     delete[] _data;
-//     _shape = other._shape;
-//     _strides = other._strides;
-//     _num_elements = other._num_elements;
-//     _data = nullptr;
-//     if (_num_elements > 0) {
-//       _data = new T[_num_elements];
-//       for (int i = 0; i < _num_elements; ++i) _data[i] = other._data[i];
-//       // std::copy(other._data, other._data + _num_elements, _data);
-//     }
-//   }
-//   return *this;
-// }
 
 void operator_plus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
                                   ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
