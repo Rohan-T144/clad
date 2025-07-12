@@ -75,17 +75,9 @@ public:
   FTensor forward(const FTensor& input) const {
     const int B = input.size(0);
     const int T = input.size(1);
-    std::vector<int> qkv_shape(4);
-    qkv_shape[0] = B; // Batch size
-    qkv_shape[1] = T; // Sequence length
-    qkv_shape[2] = num_heads; // Number of heads
-    qkv_shape[3] = head_size; // Head size
-    std::vector<int> reshaped_shape(3);
-    reshaped_shape[0] = B; // Batch size
-    reshaped_shape[1] = T; // Sequence length
-    reshaped_shape[2] = channels; // Channels
-    // const std::vector<int> qkv_shape{{B, T, num_heads, head_size}};
-
+    std::vector<int> qkv_shape{{B, T, num_heads, head_size}};
+    std::vector<int> reshaped_shape{{B, T, channels}};
+    
     // Compute Q, K, V
     auto qkv_out = qkv.forward(input);
     auto qkv_split = qkv_out.split(channels, 2);
@@ -276,7 +268,7 @@ public:
     ITensor input_pos(input_pos_shape); // Create position indices
     for (int b = 0; b < B; ++b)
       for (int t = 0; t < T; ++t)
-        input_pos._data[b * T + t] = t; // Fill with sequential positions 0, 1, ..., T-1 for each batch
+        input_pos.data()[b * T + t] = t; // Fill with sequential positions 0, 1, ..., T-1 for each batch
         // input_pos.at(b, t) = t;
 
     auto hidden = transformer.forward(input, input_pos);

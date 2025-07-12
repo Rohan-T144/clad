@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -48,14 +47,6 @@ inline void fseek_check(FILE* fp, long off, int whence) {
 }
 } // namespace utils
 
-// Random permutation function
-inline void random_permutation(std::vector<int>& data, std::uniform_int_distribution<int>& state, std::mt19937& rng) {
-  for (int i = static_cast<int>(data.size()) - 1; i > 0; i--) {
-    int j = state(rng) % (i + 1);
-    std::swap(data[i], data[j]);
-  }
-}
-
 class DataLoader {
 private:
   static constexpr int HEADER_SIZE = 256;
@@ -87,7 +78,6 @@ private:
 
   // Random shuffle related variables
   std::mt19937 rng_;
-  std::uniform_int_distribution<int> uidist_;
   // mt19937_state shuffle_rng_;
   bool should_shuffle_;
   std::vector<int> shard_indices_;
@@ -159,7 +149,7 @@ private:
       intra_shard_indices_.resize(shard_num_samples_);
       for (size_t i = 0; i < shard_num_samples_; ++i)
         intra_shard_indices_[i] = static_cast<int>(i);
-      random_permutation(intra_shard_indices_, uidist_, rng_);
+      std::shuffle(intra_shard_indices_.begin(), intra_shard_indices_.end(), rng_);
     }
   }
 
@@ -183,9 +173,8 @@ public:
     bool should_shuffle = false
   )
       : process_rank_(process_rank), num_processes_(num_processes), B_(B), T_(T), shard_num_samples_(0),
-        current_shard_idx_(0), current_sample_idx_(0), tokens_file_(nullptr, fclose), rng_(42 + process_rank_),
-        uidist_(0, INT_MAX), should_shuffle_(should_shuffle),
-        total_batch_size_bytes_(num_processes_ * B_ * T_ * sizeof(uint16_t)),
+        current_shard_idx_(0), current_sample_idx_(0), tokens_file_(nullptr, fclose), rng_(37 + process_rank_),
+        should_shuffle_(should_shuffle), total_batch_size_bytes_(num_processes_ * B_ * T_ * sizeof(uint16_t)),
         local_batch_offset_bytes_(process_rank_ * B_ * T_ * sizeof(uint16_t)), header_bytes_(HEADER_SIZE * sizeof(int)),
         file_size_bytes_(0), init_ok_(false) {
     std::memset(&glob_result_, 0, sizeof(glob_result_));
@@ -246,10 +235,8 @@ public:
     current_sample_idx_ = 0;
 
     if (should_shuffle_)
-      random_permutation(shard_indices_, uidist_, rng_);
-
+      std::shuffle(shard_indices_.begin(), shard_indices_.end(), rng_);
     load_shard(static_cast<int>(current_shard_idx_));
-
     if (should_shuffle_)
       prepare_intra_shard_indices();
   }

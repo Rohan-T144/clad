@@ -37,7 +37,7 @@ CLAD_INCLUDE = $(CLAD_PATH)/include/
 # =============================================================================
 
 # Define all available targets and their source files
-TARGETS = train_llm inference infgrad mvp nn nn_static nntest test
+TARGETS = train_llm inference infgrad mvp nn nn_static nntest test train_pool
 
 # Source files for each target (defaults to <target>.cpp)
 train_llm_SRC = train_llm.cpp
@@ -48,6 +48,7 @@ nn_SRC = nn.cpp
 nn_static_SRC = nn_static.cpp
 nntest_SRC = nntest.cpp
 test_SRC = test.cpp
+train_pool_SRC = train_pool.cpp
 
 # Per-target feature flags (override defaults)
 # Example: train_llm_USE_OMP = 1

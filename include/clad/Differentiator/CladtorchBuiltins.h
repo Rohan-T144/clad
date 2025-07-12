@@ -15,6 +15,25 @@ template <class T> void zero_init(::std::vector<::cladtorch::Tensor<T>>& p) {
 
 namespace custom_derivatives {
 namespace cladtorch {
+inline ::clad::ValueAndPushforward<float, float> gelu_kernel_pushforward(float x, float _d_x) {
+    const float _d_sqrt_2_over_pi = 0.F;
+    const float sqrt_2_over_pi = 0.797884583F;
+    float _t0 = 0.0447149985F * x;
+    float _t1 = _t0 * x;
+    float _t2 = (x + _t1 * x);
+    ValueAndPushforward<float, float> _t3 = ::clad::custom_derivatives::std::tanh_pushforward(sqrt_2_over_pi * _t2, _d_sqrt_2_over_pi * _t2 + sqrt_2_over_pi * (_d_x + ((0.F * x + 0.0447149985F * _d_x) * x + _t0 * _d_x) * x + _t1 * _d_x));
+    float _t4 = 0.5F * x;
+    float _t5 = (1.F + _t3.value);
+    return {_t4 * _t5, (0.F * x + 0.5F * _d_x) * _t5 + _t4 * (0.F + _t3.pushforward)};
+}
+void gelu_pullback(const ::cladtorch::Tensor<float> &in, ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float> *_d_in) {
+    for (int i=0;i<_d_y.num_elements();i++) {
+        float _d_r_d0 = _d_y.data()[i];
+        float _r0 = 0.F;
+        _r0 += _d_r_d0 * gelu_kernel_pushforward(in.data()[i], 1.F).pushforward;
+        (*_d_in).data()[i] += _r0;
+    }
+}
 // Matrix multiplication pullback
 template <typename T>
 void matmul_pullback(const ::cladtorch::Tensor<T>& a, const ::cladtorch::Tensor<T>& b, ::cladtorch::Tensor<T> _d_y,
@@ -172,7 +191,7 @@ void cross_entropy_loss_pullback(const ::cladtorch::Tensor<T>& probs, const ::cl
   T avg_loss_grad = loss_grad / batch_size; // Since we return mean loss
 
   for (int batch = 0; batch < batch_size; ++batch) {
-    int target = targets._data[batch];
+    int target = targets.data()[batch];
     for (int cls = 0; cls < num_classes; ++cls) {
       int idx = batch * num_classes + cls;
       if (cls == target) {
@@ -358,6 +377,20 @@ void linear_pullback(const ::cladtorch::Tensor<T>& input, const ::cladtorch::Ten
 } // namespace cladtorch
 namespace class_functions {
 
+template<typename T>
+void scalar_pullback(const ::cladtorch::Tensor<T> *_this, T _d_y, ::cladtorch::Tensor<T> *_d_this) {
+    _d_this->data()[0] += _d_y;
+}
+
+template<typename T>
+clad::ValueAndAdjoint<T*, T*> data_reverse_forw(::cladtorch::Tensor<T> *_this, ::cladtorch::Tensor<T> *_d_this) {
+    return {_this->data(), _d_this->data()};
+}
+
+template<typename T>
+void data_pullback(::cladtorch::Tensor<T> *_this, ::cladtorch::Tensor<T> *_d_this) {
+}
+
 void operator_plus_equal_pullback(::cladtorch::Tensor<float>* _this, const ::cladtorch::Tensor<float>& other,
                                   ::cladtorch::Tensor<float> _d_y, ::cladtorch::Tensor<float>* _d_this,
                                   ::cladtorch::Tensor<float>* _d_other) {
@@ -382,7 +415,7 @@ void operator_plus_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
     int len = _d_other->num_elements();
     for (int i = 0; i < batch_size; i++)
       for (int j = 0; j < len; j++)
-        _d_other->_data[j] += _d_y._data[i * len + j];
+        _d_other->data()[j] += _d_y.data()[i * len + j];
     // *_d_other += _d_y; // Assuming _d_y can be broadcasted to both shapes
   }
 }
@@ -442,7 +475,7 @@ void operator_star_pullback(const ::cladtorch::Tensor<float>* _this, const ::cla
     int len = _d_other->num_elements();
     for (int i = 0; i < batch_size; i++)
       for (int j = 0; j < len; j++)
-        _d_other->_data[j] += grad_other._data[i * len + j];
+        _d_other->data()[j] += grad_other.data()[i * len + j];
   }
 }
 
