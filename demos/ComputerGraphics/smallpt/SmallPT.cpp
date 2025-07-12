@@ -420,6 +420,42 @@ Vec radiance(const Ray &ray, int depth, unsigned short *Xi) {
 
 }
 
+void render(int w, int h, int samps, const Ray &cam, Vec *frame) {
+  Vec cx=Vec(w*.5135/h);
+  Vec cy=(cx%cam.d).norm()*.5135;
+  Vec r;
+  #pragma omp parallel for schedule(dynamic, 1) private(r)
+  for (unsigned short y=0; y<h; y++) { // Loop over image rows
+    for (unsigned short x=0, Xi[3]={0,0,(unsigned short)(y*y*y)}; x<w; x++) { // Loop cols
+      for (int sy=0, i=(h-y-1)*w+x; sy<2; sy++) { // 2x2 subpixel rows
+        for (int sx=0; sx<2; sx++, r=Vec()) {     // 2x2 subpixel cols
+          for (int s=0; s<samps; s++) {
+            double r1=2*erand48(Xi), dx=r1<1 ? sqrt(r1)-1 : 1-sqrt(2-r1);
+            double r2=2*erand48(Xi), dy=r2<1 ? sqrt(r2)-1 : 1-sqrt(2-r2);
+            Vec d = cx*(((sx+.5+dx)/2+x)/w-.5)+cy*(((sy+.5+dy)/2+y)/h-.5)+cam.d;
+            r = r + radiance(Ray(cam.o+d*140, d.norm()), 0, Xi)*(1./samps);
+          } // Camera rays are pushed ^^^^^ forward to start in interior
+          frame[i] = frame[i] + Vec(clamp(r.x), clamp(r.y), clamp(r.z))*.25;
+        }
+      }
+    }
+  }
+}
+
+double loss(int w, int h, int samps, const Ray &cam, const Vec* target_frame) {
+  Vec *frame = new Vec[w*h];
+  render(w, h, samps, cam, frame);
+
+  // Calculate loss as the sum of squared differences
+  double loss_value = 0.0;
+  for (int i = 0; i < w * h; ++i) {
+    Vec diff = frame[i] - target_frame[i];
+    loss_value += diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+  }
+  delete[] frame; // Clean up allocated memory
+  return loss_value;
+}
+
 int main(int argc, char *argv[]) {
 
 //  int w=1024, h=768, samps = argc==2 ? atoi(argv[1])/4 : 1; // # samples
@@ -450,6 +486,9 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+  
+  auto grad = clad::gradient(loss);
+  grad.dump();
 
   // Write image to PPM file.
   char filename[100];
