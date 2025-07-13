@@ -11,12 +11,12 @@
 // - A focused demonstration of clad for differentiable rendering.
 //
 // To compile (example using Clang):
-// clang++ -std=c++17 -O3 -fopenmp -o ModernPT ModernPT.cpp \
+// clang++ -std=c++17 -O3 -fopenmp -o tracer tracer.cpp \
 //   -Xclang -add-plugin -Xclang clad -Xclang -load -Xclang /path/to/libclad.so \
 //   -I/path/to/clad/include
 //
 // To run:
-// ./ModernPT 16
+// ./tracer 16
 // (The argument is the number of samples per pixel, e.g., 16)
 //-----------------------------------------------------------------------------------------//
 #include "clad/Differentiator/Differentiator.h"
@@ -198,7 +198,11 @@ public:
 
 // --- Scene Management ---
 
-using Scene = std::vector<Sphere>;
+// using Scene = std::vector<Sphere>;
+struct Scene {
+  Sphere arr[9]; // Fixed size for Cornell Box
+  size_t size() const { return sizeof(arr) / sizeof(arr[0]); } // Returns the number of spheres in the scene
+};
 
 struct Intersection {
   double distance = INF;
@@ -217,7 +221,7 @@ Intersection find_intersection(const Scene& scene, const Ray& ray) {
   closest_hit.distance = INF;
 
   for (size_t i = 0; i < scene.size(); ++i) {
-    double d = scene[i].intersect(ray);
+    double d = scene.arr[i].intersect(ray);
     if (d < closest_hit.distance) {
       closest_hit.distance = d;
       closest_hit.object_id = i;
@@ -234,15 +238,15 @@ Intersection find_intersection(const Scene& scene, const Ray& ray) {
 Scene create_scene() {
   Scene scene;
   // The Cornell Box walls, floor, ceiling, and light are large spheres.
-  scene.emplace_back(1e5, Vec(1e5 + 1, 40.8, 81.6), Vec(), Vec(0.75, 0.25, 0.25), DIFFUSE);   // Left
-  scene.emplace_back(1e5, Vec(-1e5 + 99, 40.8, 81.6), Vec(), Vec(0.25, 0.25, 0.75), DIFFUSE); // Right
-  scene.emplace_back(1e5, Vec(50, 40.8, 1e5), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE);         // Back
-  scene.emplace_back(1e5, Vec(50, 40.8, -1e5 + 170), Vec(), Vec(), DIFFUSE);                  // Front
-  scene.emplace_back(1e5, Vec(50, 1e5, 81.6), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE);         // Bottom
-  scene.emplace_back(1e5, Vec(50, -1e5 + 81.6, 81.6), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE); // Top
-  scene.emplace_back(16.5, Vec(27, 16.5, 47), Vec(), Vec(1, 1, 1) * 0.999, SPECULAR);         // Mirror
-  scene.emplace_back(16.5, Vec(73, 16.5, 78), Vec(), Vec(1, 1, 1) * 0.999, REFRACTIVE);       // Glass
-  scene.emplace_back(600, Vec(50, 681.6 - 0.27, 81.6), Vec(12, 12, 12), Vec(), DIFFUSE);      // Light
+  scene.arr[0] = Sphere(1e5, Vec(1e5 + 1, 40.8, 81.6), Vec(), Vec(0.75, 0.25, 0.25), DIFFUSE);   // Left
+  scene.arr[1] = Sphere(1e5, Vec(-1e5 + 99, 40.8, 81.6), Vec(), Vec(0.25, 0.25, 0.75), DIFFUSE); // Right
+  scene.arr[2] = Sphere(1e5, Vec(50, 40.8, 1e5), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE);         // Back
+  scene.arr[3] = Sphere(1e5, Vec(50, 40.8, -1e5 + 170), Vec(), Vec(), DIFFUSE);                  // Front
+  scene.arr[4] = Sphere(1e5, Vec(50, 1e5, 81.6), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE);         // Bottom
+  scene.arr[5] = Sphere(1e5, Vec(50, -1e5 + 81.6, 81.6), Vec(), Vec(0.75, 0.75, 0.75), DIFFUSE); // Top
+  scene.arr[6] = Sphere(16.5, Vec(27, 16.5, 47), Vec(), Vec(1, 1, 1) * 0.999, SPECULAR);         // Mirror
+  scene.arr[7] = Sphere(16.5, Vec(73, 16.5, 78), Vec(), Vec(1, 1, 1) * 0.999, REFRACTIVE);       // Glass
+  scene.arr[8] = Sphere(600, Vec(50, 681.6 - 0.27, 81.6), Vec(12, 12, 12), Vec(), DIFFUSE);      // Light
   return scene;
 }
 
@@ -265,7 +269,7 @@ Vec radiance(Scene& scene, Ray ray) {
     if (!hit.hit)
       return accumulated_color; // Ray missed the scene, return black.
 
-    const Sphere& obj = scene[hit.object_id];
+    const Sphere& obj = scene.arr[hit.object_id];
     Vec hit_point = ray.origin + ray.direction * hit.distance;
     Vec normal = obj.normal(hit_point);
     Vec oriented_normal = normal.dot(ray.direction) < 0 ? normal : normal * -1;
