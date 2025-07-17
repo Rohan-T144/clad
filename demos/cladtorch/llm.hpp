@@ -161,7 +161,6 @@ public:
 
   FTensor forward(const ITensor& input, const ITensor& input_pos) const {
     auto x = encoder.forward(input, input_pos);
-    // for (const auto& block : blocks) {
     for (int i=0;i<blocks.size();i++) {
       auto block_out = blocks[i].forward(x);
       x = block_out;
@@ -260,17 +259,20 @@ public:
       : config(load_config_from_checkpoint(checkpoint_path)), transformer(config) {
     load_weights_from_checkpoint(checkpoint_path);
   }
+  
+  ND ITensor get_input_pos(int B, int T) const {
+    ITensor input_pos({B, T}); // Create position indices
+    for (int b = 0; b < B; ++b)
+      for (int t = 0; t < T; ++t)
+        input_pos.data()[b * T + t] = t; // Fill with sequential positions 0, 1, ..., T-1 for each batch
+    return input_pos;
+  }
 
   FTensor forward(const ITensor& input) const {
     const int B = input.size(0);
     const int T = input.size(1);
-    const std::vector<int> input_pos_shape{{B, T}};
-    ITensor input_pos(input_pos_shape); // Create position indices
-    for (int b = 0; b < B; ++b)
-      for (int t = 0; t < T; ++t)
-        input_pos.data()[b * T + t] = t; // Fill with sequential positions 0, 1, ..., T-1 for each batch
-        // input_pos.at(b, t) = t;
-
+    ITensor input_pos = get_input_pos(B, T); // Get position indices
+    
     auto hidden = transformer.forward(input, input_pos);
     auto weight_transposed = transformer.encoder.wte.transpose(0, 1);
     auto logits = matmul(hidden, weight_transposed);
