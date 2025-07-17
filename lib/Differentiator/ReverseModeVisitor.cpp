@@ -15,6 +15,7 @@
 #include "clad/Differentiator/ExternalRMVSource.h"
 #include "clad/Differentiator/MultiplexExternalRMVSource.h"
 #include "clad/Differentiator/StmtClone.h"
+#include "clad/Differentiator/VisitorBase.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTLambda.h"
@@ -236,6 +237,10 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
 
   DerivativeAndOverload ReverseModeVisitor::Derive() {
     assert(m_DiffReq.Function && "Must not be null.");
+
+    PrettyStackTraceDerivative CrashInfo(m_DiffReq, m_Blocks, m_Sema,
+                                         &m_CurVisitedStmt);
+
     if (m_ExternalSource)
       m_ExternalSource->ActOnStartOfDerive();
     if (m_DiffReq.Mode == DiffMode::error_estimation)
@@ -1686,7 +1691,19 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         // same as the call expression as it is the type used to declare the
         // _gradX array
         QualType dArgTy = utils::getNonConstType(arg->getType(), m_Sema);
-        VarDecl* dArgDecl = BuildVarDecl(dArgTy, "_r", getZeroInit(dArgTy));
+        bool shouldCopyInitialize = false;
+        if (const CXXRecordDecl* CRD = dArgTy->getAsCXXRecordDecl())
+          shouldCopyInitialize = utils::isCopyable(CRD);
+        Expr* rInit = getZeroInit(dArgTy);
+        // Temporarily initialize the object with `*nullptr` to avoid
+        // a potential error because of non-existing default constructor.
+        if (shouldCopyInitialize) {
+          QualType ptrType =
+              m_Context.getPointerType(dArgTy.getUnqualifiedType());
+          Expr* dummy = getZeroInit(ptrType);
+          rInit = BuildOp(UO_Deref, dummy);
+        }
+        VarDecl* dArgDecl = BuildVarDecl(dArgTy, "_r", rInit);
         PreCallStmts.push_back(BuildDeclStmt(dArgDecl));
         DeclRefExpr* dArgRef = BuildDeclRef(dArgDecl);
         if (isa<CUDAKernelCallExpr>(CE)) {
@@ -1756,7 +1773,13 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         }
         CallArgDx.push_back(dArgRef);
         // Visit using uninitialized reference.
-        argDiff = Visit(arg, BuildDeclRef(dArgDecl)); // currently nullptr for subscript i diff
+        argDiff = Visit(arg, BuildDeclRef(dArgDecl));
+        if (shouldCopyInitialize) {
+          if (Expr* dInit = argDiff.getExpr_dx())
+            SetDeclInit(dArgDecl, dInit);
+          else
+            SetDeclInit(dArgDecl, getZeroInit(dArgTy));
+        }
       }
 
       // Save cloned arg in a "global" variable, so that it is accessible from
@@ -1793,7 +1816,6 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     // Stores differentiation result of implicit `this` object, if any.
     StmtDiff baseDiff;
     Expr* baseExpr = nullptr;
-    Stmt* baseDiffPush = nullptr;
     size_t idx = 0;
 
     /// Add base derivative expression in the derived call output args list if
@@ -1823,28 +1845,11 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         if (baseTy->isPointerType())
           baseTy = baseTy->getPointeeType();
         CXXRecordDecl* baseRD = baseTy->getAsCXXRecordDecl();
-        bool shouldStore = utils::isCopyable(baseRD); // TODO: shouldn't clone a std::vector
-        if (baseRD->getQualifiedNameAsString() == "std::vector")
-          shouldStore = false; // std::vector is copyable but let's not store it
-        if (shouldStore) {
-          if (!isPassedByRef || MD->isConst()) {
-            // FIXME: Custom _reverse_forw functions take the base by pointer.
-            // This means we cannot pass temporary values and because of that,
-            // we need to store. For now, only emit the store stmt if a custom
-            // reverse_forw is found.
-            beginBlock(direction::forward);
-            Expr* baseDiffStore =
-                StoreAndRef(baseDiff.getExpr(), direction::forward);
-            baseDiffPush =
-                utils::unwrapIfSingleStmt(endBlock(direction::forward));
-            baseExpr = baseDiffStore;
-          } else {
-            Expr* baseDiffStore =
-                GlobalStoreAndRef(baseDiff.getExpr(), "_t", /*force=*/true);
-            Expr* assign =
-                BuildOp(BO_Assign, baseDiff.getExpr(), baseDiffStore);
-            PreCallStmts.push_back(assign);
-          }
+        if (isPassedByRef && !MD->isConst() && utils::isCopyable(baseRD)) {
+          Expr* baseDiffStore =
+              GlobalStoreAndRef(baseDiff.getExpr(), "_t", /*force=*/true);
+          Expr* assign = BuildOp(BO_Assign, baseDiff.getExpr(), baseDiffStore);
+          PreCallStmts.push_back(assign);
         }
         Expr* baseDerivative = baseDiff.getExpr_dx();
         if (!baseDerivative->getType()->isPointerType())
@@ -2045,61 +2050,52 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       return StmtDiff(Clone(CE));
 
     Expr* call = nullptr;
-    // Stores the dx of the call arguments for the function to be derived
-    for (std::size_t i = 0, e = CE->getNumArgs() - isMethodOperatorCall; i != e;
-         ++i) {
-      const Expr* arg = CE->getArg(i + isMethodOperatorCall);
-      if (!utils::IsReferenceOrPointerArg(arg) || arg->isXValue())
-        CallArgDx[i] = getZeroInit(arg->getType());
-    }
-    if (baseDiff.getExpr_dx() &&
-        !baseDiff.getExpr_dx()->getType()->isPointerType())
-      CallArgDx.insert(CallArgDx.begin(), BuildOp(UnaryOperatorKind::UO_AddrOf,
-                                                  baseDiff.getExpr_dx(), Loc));
+    // Lookup a reverse_forw function and build if necessary.
+    DiffRequest calleeFnForwPassReq;
+    calleeFnForwPassReq.Function = FD;
+    calleeFnForwPassReq.Mode = DiffMode::reverse_mode_forward_pass;
+    calleeFnForwPassReq.BaseFunctionName =
+        clad::utils::ComputeEffectiveFnName(FD);
+    calleeFnForwPassReq.VerboseDiags = true;
 
-    if (Expr* customForwardPassCE =
-            BuildCallToCustomForwPassFn(CE, CallArgs, CallArgDx, baseExpr)) {
-      addToCurrentBlock(baseDiffPush, direction::forward);
-      // if (!needsForwPass)
-      //   return StmtDiff{customForwardPassCE};
-      Expr* callRes = nullptr;
-      if (isInsideLoop)
-        callRes = GlobalStoreAndRef(customForwardPassCE, /*prefix=*/"_t",
-                                    /*force=*/true);
-      else
-        callRes = StoreAndRef(customForwardPassCE);
-      auto* resValue =
-          utils::BuildMemberExpr(m_Sema, getCurrentScope(), callRes, "value");
-      auto* resAdjoint =
-          utils::BuildMemberExpr(m_Sema, getCurrentScope(), callRes, "adjoint");
-      return StmtDiff(resValue, resAdjoint);
-    }
-    if (needsForwPass) {
-      DiffRequest calleeFnForwPassReq;
-      calleeFnForwPassReq.Function = FD;
-      calleeFnForwPassReq.Mode = DiffMode::reverse_mode_forward_pass;
-      calleeFnForwPassReq.BaseFunctionName =
-          clad::utils::ComputeEffectiveFnName(FD);
-      calleeFnForwPassReq.VerboseDiags = true;
-
-      FunctionDecl* calleeFnForwPassFD =
-          m_Builder.HandleNestedDiffRequest(calleeFnForwPassReq);
-
-      assert(calleeFnForwPassFD &&
-             "Clad failed to generate callee function forward pass function");
-
+    FunctionDecl* calleeFnForwPassFD = FindDerivedFunction(calleeFnForwPassReq);
+    if (calleeFnForwPassFD) {
+      for (std::size_t i = 0, e = CE->getNumArgs() - isMethodOperatorCall;
+           i != e; ++i) {
+        const Expr* arg = CE->getArg(i + isMethodOperatorCall);
+        if (!utils::IsReferenceOrPointerArg(arg) || arg->isXValue())
+          CallArgDx[i] = getZeroInit(arg->getType());
+      }
+      if (baseDiff.getExpr_dx() &&
+          !baseDiff.getExpr_dx()->getType()->isPointerType())
+        CallArgDx.insert(
+            CallArgDx.begin(),
+            BuildOp(UnaryOperatorKind::UO_AddrOf, baseDiff.getExpr_dx(), Loc));
       CallArgs.insert(CallArgs.end(), CallArgDx.begin(), CallArgDx.end());
-      if (Expr* baseE = baseDiff.getExpr()) {
-        call = BuildCallExprToMemFn(baseE, calleeFnForwPassFD->getName(),
-                                    CallArgs, Loc);
+      const auto* forwPassMD = dyn_cast<CXXMethodDecl>(calleeFnForwPassFD);
+      Expr* baseE = baseDiff.getExpr();
+      if (forwPassMD && forwPassMD->isInstance()) {
+        call = BuildCallExprToMemFn(
+            baseDiff.getExpr(), calleeFnForwPassFD->getName(), CallArgs, Loc);
       } else {
+        if (baseE) {
+          baseE = BuildOp(UO_AddrOf, baseE);
+          CallArgs.insert(CallArgs.begin(), baseE);
+        }
         call = m_Sema
                    .ActOnCallExpr(getCurrentScope(),
                                   BuildDeclRef(calleeFnForwPassFD), Loc,
                                   CallArgs, Loc, CUDAExecConfig)
                    .get();
       }
-      auto* callRes = StoreAndRef(call);
+      if (!needsForwPass && !m_TrackVarDeclConstructor)
+        return StmtDiff(call);
+      Expr* callRes = nullptr;
+      if (isInsideLoop)
+        callRes = GlobalStoreAndRef(call, /*prefix=*/"_t",
+                                    /*force=*/true);
+      else
+        callRes = StoreAndRef(call);
       auto* resValue =
           utils::BuildMemberExpr(m_Sema, getCurrentScope(), callRes, "value");
       auto* resAdjoint =
@@ -3272,8 +3268,26 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     return Visit(EWC->getSubExpr(), dfdx());
   }
 
+  /// Called in ShouldRecompute. In CUDA, to access a current thread/block id
+  /// we use functions that do not change the state of any variable, since no
+  /// point to store the value.
+  static bool isCUDABuiltInIndex(const Expr* E) {
+    const clang::Expr* B = E->IgnoreImplicit();
+    if (const auto* pseudoE = llvm::dyn_cast<PseudoObjectExpr>(B)) {
+      if (const auto* opaqueE =
+              llvm::dyn_cast<OpaqueValueExpr>(pseudoE->getSemanticExpr(0))) {
+        const Expr* innerE = opaqueE->getSourceExpr()->IgnoreImplicit();
+        QualType innerT = innerE->getType();
+        if (innerT.isConstQualified())
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool ReverseModeVisitor::ShouldRecompute(const Expr* E) {
-    return !(utils::ContainsFunctionCalls(E) || E->HasSideEffects(m_Context));
+    return !(utils::ContainsFunctionCalls(E) || E->HasSideEffects(m_Context)) ||
+           isCUDABuiltInIndex(E);
   }
 
   bool ReverseModeVisitor::UsefulToStoreGlobal(Expr* E) {
@@ -4153,6 +4167,16 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     return {nullptr, nullptr};
   }
 
+  static bool isNAT(QualType T) {
+    T = utils::GetValueType(T);
+    if (const auto* RT = T->getAs<RecordType>()) {
+      const RecordDecl* RD = RT->getDecl();
+      if (RD->getNameAsString() == "__nat")
+        return true;
+    }
+    return false;
+  }
+
   StmtDiff
   ReverseModeVisitor::VisitCXXConstructExpr(const CXXConstructExpr* CE) {
     CXXConstructorDecl* CD = CE->getConstructor();
@@ -4191,10 +4215,18 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
       }
     }
 
+    // FIXME: This logic is the same as in VisitCallExpr.
+    // We should probably move this to a file static
     // FIXME: Restore arguments passed as non-const reference.
     for (std::size_t i = 0, e = CE->getNumArgs(); i != e; ++i) {
       const Expr* arg = CE->getArg(i);
       QualType ArgTy = arg->getType();
+      // FIXME: We handle parameters with default values by setting them
+      // explicitly. However, some of them have private types and cannot be set.
+      // For this reason, we ignore std::__nat. We need to come up with a
+      // general solution.
+      if (isNAT(ArgTy))
+        break;
       StmtDiff argDiff{};
       Expr* adjointArg = nullptr;
       if (utils::IsReferenceOrPointerArg(arg) || nonDiff) {
@@ -4218,12 +4250,31 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         // _d_u += _r0;
         QualType dArgTy = utils::getNonConstType(CloneType(ArgTy), m_Sema);
         Expr* init = getStdInitListSizeExpr(arg);
+        bool shouldCopyInitialize = false;
+        if (!init) {
+          if (const CXXRecordDecl* CRD = dArgTy->getAsCXXRecordDecl())
+            shouldCopyInitialize = utils::isCopyable(CRD);
+          // Temporarily initialize the object with `*nullptr` to avoid
+          // a potential error because of non-existing default constructor.
+          if (shouldCopyInitialize) {
+            QualType ptrType =
+                m_Context.getPointerType(dArgTy.getUnqualifiedType());
+            Expr* dummy = getZeroInit(ptrType);
+            init = BuildOp(UO_Deref, dummy);
+          }
+        }
         if (!init)
           init = getZeroInit(dArgTy);
         VarDecl* dArgDecl = BuildVarDecl(dArgTy, "_r", init);
         prePullbackCallStmts.push_back(BuildDeclStmt(dArgDecl));
         adjointArg = BuildDeclRef(dArgDecl);
         argDiff = Visit(arg, BuildDeclRef(dArgDecl));
+        if (shouldCopyInitialize) {
+          if (Expr* dInit = argDiff.getExpr_dx())
+            SetDeclInit(dArgDecl, dInit);
+          else
+            SetDeclInit(dArgDecl, getZeroInit(dArgTy));
+        }
       }
 
       if (utils::isArrayOrPointerType(CD->getParamDecl(i)->getType()) ||
@@ -4231,8 +4282,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
         reverseForwAdjointArgs.push_back(adjointArg);
         adjointArgs.push_back(adjointArg);
       } else {
-        if (utils::IsReferenceOrPointerArg(arg))
-          reverseForwAdjointArgs.push_back(adjointArg);
+        if (argDiff.getExpr_dx())
+          reverseForwAdjointArgs.push_back(argDiff.getExpr_dx());
         else
           reverseForwAdjointArgs.push_back(getZeroInit(ArgTy));
         adjointArgs.push_back(BuildOp(UnaryOperatorKind::UO_AddrOf, adjointArg,
@@ -4311,7 +4362,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     }
 
     // Create the constructor call in the forward-pass, or creates
-    // 'constructor_forw' call if possible.
+    // 'constructor_reverse_forw' call if possible.
 
     // This works as follows:
     //
@@ -4324,7 +4375,8 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     // ```
     // // forward-pass
     // clad::ValueAndAdjoint<SomeClass, SomeClass> _t0 =
-    //   constructor_forw(clad::ConstructorReverseForwTag<SomeClass>{}, u, v,
+    //   constructor_reverse_forw(clad::ConstructorReverseForwTag<SomeClass>{},
+    //   u, v,
     //     _d_u, _d_v);
     // SomeClass _d_c = _t0.adjoint;
     // SomeClass c = _t0.value;

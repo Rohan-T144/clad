@@ -978,6 +978,16 @@ namespace clad {
       return Type;
     }
 
+    static bool isNAT(QualType T) {
+      T = GetValueType(T);
+      if (const auto* RT = T->getAs<RecordType>()) {
+        const RecordDecl* RD = RT->getDecl();
+        if (RD->getNameAsString() == "__nat")
+          return true;
+      }
+      return false;
+    }
+
     QualType
     GetDerivativeType(Sema& S, const clang::FunctionDecl* FD, DiffMode mode,
                       llvm::ArrayRef<const clang::ValueDecl*> diffParams,
@@ -989,9 +999,17 @@ namespace clad {
 
       const auto* FnProtoTy = llvm::cast<FunctionProtoType>(FD->getType());
       FunctionProtoType::ExtProtoInfo EPI = FnProtoTy->getExtProtoInfo();
-      llvm::SmallVector<QualType, 16> FnTypes(
-          FnProtoTy->getParamTypes().begin(), FnProtoTy->getParamTypes().end());
-
+      llvm::SmallVector<QualType, 16> FnTypes;
+      FnTypes.reserve(2 * FnProtoTy->getNumParams() + 1);
+      for (QualType T : FnProtoTy->getParamTypes()) {
+        // FIXME: We handle parameters with default values by setting them
+        // explicitly. However, some of them have private types and cannot be
+        // set. For this reason, we ignore std::__nat. We need to come up with a
+        // general solution.
+        if (isNAT(T))
+          break;
+        FnTypes.push_back(T);
+      }
       if (mode == DiffMode::reverse || mode == DiffMode::pullback)
         for (QualType& T : FnTypes)
           T = utils::replaceStdInitListWithCladArray(S, T);
@@ -1002,7 +1020,8 @@ namespace clad {
                         mode == DiffMode::pullback ||
                         mode == DiffMode::error_estimation ||
                         mode == DiffMode::vector_forward_mode;
-      if (mode == DiffMode::reverse_mode_forward_pass) {
+      if (mode == DiffMode::reverse_mode_forward_pass &&
+          !oRetTy->isVoidType()) {
         TemplateDecl* valAndAdjointTempDecl =
             utils::LookupTemplateDeclInCladNamespace(S, "ValueAndAdjoint");
         dRetTy = utils::InstantiateTemplate(S, valAndAdjointTempDecl,
@@ -1044,6 +1063,12 @@ namespace clad {
       // Iterate over all but the "this" type and extend the signature to add
       // the extra parameters.
       for (size_t i = 0, e = FnProtoTy->getNumParams(); i < e; ++i) {
+        // FIXME: We handle parameters with default values by setting them
+        // explicitly. However, some of them have private types and cannot be
+        // set. For this reason, we ignore std::__nat. We need to come up with a
+        // general solution.
+        if (isNAT(FnProtoTy->getParamType(i)))
+          break;
         QualType PVDTy = FnTypes[i];
         if (mode == DiffMode::jacobian &&
             !(utils::isArrayOrPointerType(PVDTy) || PVDTy->isReferenceType()))
