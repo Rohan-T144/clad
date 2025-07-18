@@ -245,6 +245,14 @@ template <typename T> inline void element_wise_mul_kernel(const T* a, const T* b
   for (size_t i = 0; i < n; ++i)
     r[i] = a[i] * b[i];
 }
+template <typename T> inline void element_wise_div_kernel(const T* a, const T* b, T* r, size_t n) {
+  for (size_t i = 0; i < n; ++i)
+    r[i] = a[i] / b[i];
+}
+template <typename T> inline void scalar_add_kernel(const T* in, T s, T* r, size_t n) {
+  for (size_t i = 0; i < n; ++i)
+    r[i] = in[i] + s;
+}
 template <typename T> inline void scalar_mul_kernel(const T* in, T s, T* r, size_t n) {
   for (size_t i = 0; i < n; ++i)
     r[i] = in[i] * s;
@@ -280,27 +288,234 @@ inline void view_kernel(
   for (size_t dim : dst_shape)
     dst_elements *= dim;
 
-  for (size_t dst_idx = 0; dst_idx < dst_elements; ++dst_idx) {
-    // Convert flat index to multi-dimensional indices for dst
-    std::vector<int> dst_coords(dst_shape.size());
-    size_t temp_idx = dst_idx;
-    for (long i = dst_shape.size() - 1; i >= 0; --i) {
-      dst_coords[i] = temp_idx % dst_shape[i];
-      temp_idx /= dst_shape[i];
+  // Fast path: contiguous memory copy when possible
+  if (dst_strides.size() > 0 && dst_strides.back() == 1 && src_strides.back() == 1 &&
+      split_axis == dst_shape.size() - 1) {
+    size_t copy_size = dst_shape[split_axis];
+    size_t outer_elements = dst_elements / copy_size;
+    size_t src_stride = src_strides[split_axis];
+    size_t dst_stride = dst_strides[split_axis];
+    
+    const T* src_ptr = src_data + offset;
+    for (size_t i = 0; i < outer_elements; ++i) {
+      std::memcpy(dst_data + i * copy_size, src_ptr + i * src_stride * src_shape[split_axis], 
+                  copy_size * sizeof(T));
     }
+    return;
+  }
 
-    // Map dst coordinates to src coordinates
-    std::vector<int> src_coords = dst_coords;
-    src_coords[split_axis] += offset;
+  // Optimized path: direct stride calculation
+  size_t split_stride = src_strides[split_axis];
+  size_t base_offset = offset * split_stride;
+  
+  // Calculate strides for coordinate-free indexing
+  std::vector<size_t> coord_multipliers(dst_shape.size());
+  coord_multipliers.back() = 1;
+  for (long i = dst_shape.size() - 2; i >= 0; --i) {
+    coord_multipliers[i] = coord_multipliers[i + 1] * dst_shape[i + 1];
+  }
 
-    // Convert src coordinates to flat index
-    size_t src_idx = 0;
-    for (size_t i = 0; i < src_coords.size(); ++i)
-      src_idx += src_coords[i] * src_strides[i];
-
+#ifdef _OPENMP
+  #pragma omp parallel for if(dst_elements > 10000)
+#endif
+  for (size_t dst_idx = 0; dst_idx < dst_elements; ++dst_idx) {
+    size_t src_idx = base_offset;
+    size_t temp_idx = dst_idx;
+    
+    // Direct calculation without coordinate arrays
+    for (size_t i = 0; i < dst_shape.size(); ++i) {
+      size_t coord = temp_idx / coord_multipliers[i];
+      temp_idx %= coord_multipliers[i];
+      src_idx += coord * src_strides[i];
+    }
+    
     dst_data[dst_idx] = src_data[src_idx];
   }
 }
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#if defined(__SSE2__) || defined(__AVX__)
+#include <immintrin.h>
+#endif
+
+// Optimized 2D matrix transpose for common case
+template <typename T> inline void transpose_2d_kernel(const T* src_data, T* dst_data, size_t rows, size_t cols) {
+  constexpr size_t BLOCK_SIZE = 64; // Cache-friendly block size
+
+  for (size_t i = 0; i < rows; i += BLOCK_SIZE) {
+    for (size_t j = 0; j < cols; j += BLOCK_SIZE) {
+      size_t max_i = std::min(i + BLOCK_SIZE, rows);
+      size_t max_j = std::min(j + BLOCK_SIZE, cols);
+
+      for (size_t ii = i; ii < max_i; ++ii)
+        for (size_t jj = j; jj < max_j; ++jj)
+          dst_data[jj * rows + ii] = src_data[ii * cols + jj];
+    }
+  }
+}
+
+// SIMD-optimized transpose for float/double types
+template <> inline void transpose_2d_kernel<float>(const float* src_data, float* dst_data, size_t rows, size_t cols) {
+  constexpr size_t BLOCK_SIZE = 64;
+
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (rows * cols > 10000)
+#endif
+  for (size_t i = 0; i < rows; i += BLOCK_SIZE) {
+    for (size_t j = 0; j < cols; j += BLOCK_SIZE) {
+      size_t max_i = std::min(i + BLOCK_SIZE, rows);
+      size_t max_j = std::min(j + BLOCK_SIZE, cols);
+
+#ifdef __AVX__
+      // AVX vectorized inner loop for aligned blocks
+      if ((max_j - j) >= 8 && (max_i - i) >= 8) {
+        for (size_t ii = i; ii < max_i; ii += 8) {
+          for (size_t jj = j; jj < max_j; jj += 8) {
+            // Load 8x8 block and transpose using AVX
+            __m256 row[8];
+            for (int k = 0; k < 8; ++k)
+              row[k] = _mm256_loadu_ps(&src_data[(ii + k) * cols + jj]);
+
+            // Transpose 8x8 block
+            __m256 tmp[8];
+            for (int k = 0; k < 4; ++k) {
+              tmp[k] = _mm256_unpacklo_ps(row[2 * k], row[2 * k + 1]);
+              tmp[4 + k] = _mm256_unpackhi_ps(row[2 * k], row[2 * k + 1]);
+            }
+
+            for (int k = 0; k < 8; ++k)
+              _mm256_storeu_ps(&dst_data[(jj + k) * rows + ii], tmp[k]);
+          }
+        }
+      } else
+#endif
+      {
+        // Fallback scalar version
+        for (size_t ii = i; ii < max_i; ++ii)
+          for (size_t jj = j; jj < max_j; ++jj)
+            dst_data[jj * rows + ii] = src_data[ii * cols + jj];
+      }
+    }
+  }
+}
+// Cache-efficient transpose with prefetching
+template <typename T>
+inline void transpose_cache_optimized(
+  const T* src_data, T* dst_data, size_t rows, size_t cols, size_t src_row_stride, size_t dst_row_stride
+) {
+  constexpr size_t CACHE_LINE = 64 / sizeof(T);
+  constexpr size_t BLOCK_SIZE = std::max(size_t(32), CACHE_LINE * 4);
+
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (rows * cols > 50000)
+#endif
+  for (size_t i = 0; i < rows; i += BLOCK_SIZE) {
+    for (size_t j = 0; j < cols; j += BLOCK_SIZE) {
+      size_t max_i = std::min(i + BLOCK_SIZE, rows);
+      size_t max_j = std::min(j + BLOCK_SIZE, cols);
+
+      for (size_t ii = i; ii < max_i; ++ii) {
+        const T* src_row = src_data + ii * src_row_stride;
+
+        // Prefetch next cache line
+        if (ii + 1 < max_i)
+          __builtin_prefetch(src_data + (ii + 1) * src_row_stride + j, 0, 1);
+
+        for (size_t jj = j; jj < max_j; ++jj)
+          dst_data[jj * dst_row_stride + ii] = src_row[jj];
+      }
+    }
+  }
+}
+
+// Direct stride calculation for general transpose
+template <typename T>
+inline void transpose_direct_kernel(
+  const T* src_data, T* dst_data, const std::vector<int>& src_shape, const std::vector<int>& src_strides,
+  const std::vector<int>& dst_strides, size_t dim0, size_t dim1
+) {
+  // Calculate stride differences for the transposed dimensions
+  int src_stride0 = src_strides[dim0];
+  int src_stride1 = src_strides[dim1];
+  int dst_stride0 = dst_strides[dim0];
+  int dst_stride1 = dst_strides[dim1];
+
+  // Calculate total elements and outer loop structure
+  size_t total_elements = 1;
+  for (size_t dim : src_shape)
+    total_elements *= dim;
+
+  size_t dim0_size = src_shape[dim0];
+  size_t dim1_size = src_shape[dim1];
+  size_t inner_elements = dim0_size * dim1_size;
+  size_t outer_elements = total_elements / inner_elements;
+
+  // Check if we can use cache-optimized version for contiguous 2D slices
+  bool is_contiguous_2d =
+    (src_stride1 == 1 && dst_stride0 == 1 && src_stride0 == static_cast<int>(dim1_size) &&
+     dst_stride1 == static_cast<int>(dim0_size));
+
+  if (is_contiguous_2d && outer_elements == 1) {
+    transpose_cache_optimized(src_data, dst_data, dim0_size, dim1_size, src_stride0, dst_stride1);
+    return;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for if (outer_elements > 100)
+#endif
+  for (size_t outer = 0; outer < outer_elements; ++outer) {
+    // Calculate base indices for this outer iteration
+    size_t outer_src_base = 0;
+    size_t outer_dst_base = 0;
+    size_t temp_outer = outer;
+
+    for (size_t d = 0; d < src_shape.size(); ++d) {
+      if (d == dim0 || d == dim1)
+        continue;
+
+      size_t coord = temp_outer % src_shape[d];
+      temp_outer /= src_shape[d];
+
+      outer_src_base += coord * src_strides[d];
+      outer_dst_base += coord * dst_strides[d];
+    }
+
+    // Transpose the 2D slice with blocking for better cache usage
+    constexpr size_t BLOCK = 32;
+    for (size_t i = 0; i < dim0_size; i += BLOCK) {
+      for (size_t j = 0; j < dim1_size; j += BLOCK) {
+        size_t max_i = std::min(i + BLOCK, dim0_size);
+        size_t max_j = std::min(j + BLOCK, dim1_size);
+
+        for (size_t ii = i; ii < max_i; ++ii) {
+          for (size_t jj = j; jj < max_j; ++jj) {
+            size_t src_idx = outer_src_base + ii * src_stride0 + jj * src_stride1;
+            size_t dst_idx = outer_dst_base + jj * dst_stride0 + ii * dst_stride1;
+            dst_data[dst_idx] = src_data[src_idx];
+          }
+        }
+      }
+    }
+  }
+}
+
+// Performance utilities
+namespace transpose_perf {
+inline size_t calculate_memory_bandwidth(size_t elements, size_t element_size) {
+  return elements * element_size * 2; // read + write
+}
+
+inline bool should_use_parallel(size_t total_elements) {
+  return total_elements > 50000; // Threshold for parallel processing
+}
+
+inline bool is_cache_friendly_size(size_t dim0, size_t dim1) {
+  return (dim0 * dim1 * sizeof(float)) < (1024 * 1024); // < 1MB
+}
+} // namespace transpose_perf
 
 template <typename T>
 inline void transpose_kernel(
@@ -311,25 +526,26 @@ inline void transpose_kernel(
   for (size_t dim : src_shape)
     total_elements *= dim;
 
-  for (size_t src_idx = 0; src_idx < total_elements; ++src_idx) {
-    // Convert flat index to multi-dimensional coordinates
-    std::vector<int> coords(src_shape.size());
-    size_t temp_idx = src_idx;
-    for (long i = src_shape.size() - 1; i >= 0; --i) {
-      coords[i] = temp_idx % src_shape[i];
-      temp_idx /= src_shape[i];
-    }
+  // Strategy 1: Optimized 2D transpose for contiguous matrices
+  if (src_shape.size() == 2 && dim0 == 0 && dim1 == 1 && src_strides[1] == 1 && src_strides[0] == src_shape[1] &&
+      dst_strides[0] == 1 && dst_strides[1] == src_shape[0]) {
 
-    // Swap the dimensions for transpose
-    std::swap(coords[dim0], coords[dim1]);
-
-    // Calculate destination flat index
-    size_t dst_idx = 0;
-    for (size_t i = 0; i < coords.size(); ++i)
-      dst_idx += coords[i] * dst_strides[i];
-
-    dst_data[dst_idx] = src_data[src_idx];
+    // Choose between SIMD and cache-optimized versions
+    if (transpose_perf::is_cache_friendly_size(src_shape[0], src_shape[1]))
+      transpose_2d_kernel(src_data, dst_data, src_shape[0], src_shape[1]);
+    else
+      transpose_cache_optimized(src_data, dst_data, src_shape[0], src_shape[1], src_strides[0], dst_strides[1]);
+    return;
   }
+
+  // Strategy 2: Handle large tensors with minimal dimension count
+  if (src_shape.size() <= 4 && transpose_perf::should_use_parallel(total_elements)) {
+    transpose_direct_kernel(src_data, dst_data, src_shape, src_strides, dst_strides, dim0, dim1);
+    return;
+  }
+
+  // Strategy 3: Fallback to direct method for complex cases
+  transpose_direct_kernel(src_data, dst_data, src_shape, src_strides, dst_strides, dim0, dim1);
 }
 
 inline float vec_mean_kernel(size_t vec_size, const float* src) {

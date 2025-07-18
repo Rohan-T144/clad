@@ -142,18 +142,18 @@ public:
   }
 
   // Move assignment
-  Tensor& operator=(Tensor&& other) {
-    if (this != &other) {
-      delete[] _data;
-      _shape = std::move(other._shape);
-      _strides = std::move(other._strides);
-      _num_elements = other._num_elements;
-      _data = other._data;
-      other._num_elements = 0;
-      other._data = nullptr;
-    }
-    return *this;
-  }
+  // Tensor& operator=(Tensor&& other) {
+  //   if (this != &other) {
+  //     delete[] _data;
+  //     _shape = std::move(other._shape);
+  //     _strides = std::move(other._strides);
+  //     _num_elements = other._num_elements;
+  //     _data = other._data;
+  //     other._num_elements = 0;
+  //     other._data = nullptr;
+  //   }
+  //   return *this;
+  // }
 
   // --- Accessors & Utilities ---
   const std::vector<int>& shape() const { return _shape; }
@@ -549,6 +549,30 @@ public:
       return result;
     }
   }
+  Tensor operator/(const Tensor& other) const {
+    if (_shape == other._shape) {
+      // Same shape, use optimized path
+      Tensor<T> result(*this);
+      kernels::element_wise_div_kernel(_data, other._data, result._data, result._num_elements);
+      return result;
+      // return Tensor(*this) /= other;
+    } else {
+      // Different shapes, need broadcasting
+      std::vector<int> result_shape = broadcast_shape(*this, other);
+      Tensor<T> result(result_shape);
+
+      Tensor<T> a_broadcast = this->broadcast_to(result_shape);
+      Tensor<T> b_broadcast = other.broadcast_to(result_shape);
+
+      kernels::element_wise_div_kernel(a_broadcast._data, b_broadcast._data, result._data, result._num_elements);
+      return result;
+    }
+  }
+  Tensor& operator+=(T scalar) {
+    kernels::scalar_add_kernel(_data, scalar, _data, _num_elements);
+    return *this;
+  }
+  Tensor operator+(T scalar) const { return Tensor(*this) += scalar; }
 
   Tensor& operator*=(T scalar) {
     kernels::scalar_mul_kernel(_data, scalar, _data, _num_elements);
