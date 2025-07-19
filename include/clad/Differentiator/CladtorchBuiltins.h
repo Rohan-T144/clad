@@ -3,6 +3,10 @@
 #include <clad/Differentiator/FunctionTraits.h>
 #include <cladtorch/cladtorch.hpp>
 
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#endif
+
 namespace clad {
 // specialize the zero_init function for Tensor
 template <typename T> void zero_init(::cladtorch::Tensor<T>& tensor) {
@@ -331,15 +335,108 @@ inline void linear_kernel_unrolled_pullback(const float* input, const float* wei
   }
 }
 
+// Apple Accelerate optimized linear kernel pullback
+inline void linear_kernel_accelerate_pullback(const float* input, const float* weight, const float* bias, float* output,
+                                             size_t batch_seq, size_t in_features, size_t out_features,
+                                             const float* d_output, float* d_input, float* d_weight, float* d_bias) {
+#ifdef __APPLE__
+  // For linear: output = input @ weight.T + bias
+  // Gradients are:
+  // d_input[i, k] = sum_j(d_output[i, j] * weight[j, k])  ->  d_input = d_output @ weight
+  // d_weight[j, k] = sum_i(d_output[i, j] * input[i, k])  ->  d_weight = d_output.T @ input
+  // d_bias[j] = sum_i(d_output[i, j])                     ->  sum over batch dimension
+
+  // 1. Compute d_input = d_output @ weight
+  // d_output: [batch_seq, out_features] (row major)
+  // weight:   [out_features, in_features] (row major)
+  // d_input:  [batch_seq, in_features] (row major)
+  //
+  // BLAS: C := α·A·B + β·C
+  // A = d_output, B = weight, C = d_input
+  cblas_sgemm(
+    /* order     */ CblasRowMajor,
+    /* transA    */ CblasNoTrans,
+    /* transB    */ CblasNoTrans,
+    /* M,N,K     */ (int)batch_seq, (int)in_features, (int)out_features,
+    /* α         */ 1.0f,
+    /* A, lda    */ d_output, (int)out_features,
+    /* B, ldb    */ weight, (int)in_features,
+    /* β, C, ldc */ 1.0f, d_input, (int)in_features
+  );
+
+  // 2. Compute d_weight = d_output.T @ input
+  // d_output: [batch_seq, out_features] -> transpose to [out_features, batch_seq]
+  // input:    [batch_seq, in_features]
+  // d_weight: [out_features, in_features] (row major)
+  //
+  // BLAS: C := α·A^T·B + β·C
+  // A = d_output (transposed), B = input, C = d_weight
+  cblas_sgemm(
+    /* order     */ CblasRowMajor,
+    /* transA    */ CblasTrans,
+    /* transB    */ CblasNoTrans,
+    /* M,N,K     */ (int)out_features, (int)in_features, (int)batch_seq,
+    /* α         */ 1.0f,
+    /* A, lda    */ d_output, (int)out_features,
+    /* B, ldb    */ input, (int)in_features,
+    /* β, C, ldc */ 1.0f, d_weight, (int)in_features
+  );
+
+  // // Use cblas_sgemv to compute bias gradient efficiently
+  // // d_bias = ones^T @ d_output where ones is a vector of 1s
+  // // This computes the column-wise sum of d_output
+  
+  // // Create a temporary vector of ones for the matrix-vector multiplication
+  // float* ones = (float*)malloc(batch_seq * sizeof(float));
+  // for (size_t i = 0; i < batch_seq; ++i) {
+  //   ones[i] = 1.0f;
+  // }
+  // // Compute d_bias += ones^T @ d_output using GEMV
+  // // y := α·A^T·x + β·y
+  // // A = d_output [batch_seq, out_features]
+  // // x = ones [batch_seq]
+  // // y = d_bias [out_features]
+  // cblas_sgemv(
+  //   /* order     */ CblasRowMajor,
+  //   /* trans     */ CblasTrans,
+  //   /* M, N      */ (int)batch_seq, (int)out_features,
+  //   /* α         */ 1.0f,
+  //   /* A, lda    */ d_output, (int)out_features,
+  //   /* x, incx   */ ones, 1,
+  //   /* β, y, incy */ 1.0f, d_bias, 1
+  // );
+  // free(ones);
+  // 3. Compute d_bias = sum(d_output, dim=0)
+  // x = ones [batch_seq]
+  // y = d_bias [out_features]
+  // Simple loop is efficient for bias computation and avoids memory allocation
+  for (size_t j = 0; j < out_features; ++j) {
+    float grad_bias = 0.0f;
+    for (size_t i = 0; i < batch_seq; ++i) {
+      grad_bias += d_output[i * out_features + j];
+    }
+    d_bias[j] += grad_bias;
+  }
+#else
+  // Fallback to unrolled implementation on non-Apple platforms
+  if (batch_seq % 8 == 0 && batch_seq >= 8)
+    linear_kernel_unrolled_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output,
+                                    d_input, d_weight, d_bias);
+  else
+    linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output, d_input,
+                                 d_weight, d_bias);
+#endif
+}
+
 // Linear kernel pullback dispatcher
 void linear_kernel_pullback(const float* input, const float* weight, const float* bias, float* output, size_t batch_seq,
                             size_t in_features, size_t out_features, const float* d_output, float* d_input,
                             float* d_weight, float* d_bias) {
-// #ifdef __APPLE__
-//   // Use BLAS for pullback if available
-//   linear_kernel_blas_pullback(input, weight, bias, batch_seq, in_features, out_features, d_output, d_input, d_weight,
-//                               d_bias);
-// #endif
+#ifdef __APPLE__
+  // Use Apple Accelerate optimized version on macOS
+  linear_kernel_accelerate_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output,
+                                   d_input, d_weight, d_bias);
+#else
   // Dispatch to unrolled or regular kernel based on batch_seq
   if (batch_seq % 8 == 0 && batch_seq >= 8)
     linear_kernel_unrolled_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output,
@@ -347,6 +444,7 @@ void linear_kernel_pullback(const float* input, const float* weight, const float
   else
     linear_kernel_naive_pullback(input, weight, bias, output, batch_seq, in_features, out_features, d_output, d_input,
                                  d_weight, d_bias);
+#endif
 }
 
 } // namespace kernels

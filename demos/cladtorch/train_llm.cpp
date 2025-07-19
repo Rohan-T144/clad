@@ -1,9 +1,8 @@
-#include "llm.hpp"
-#include "tokenizer.hpp"
 #include <clad/Differentiator/CladtorchBuiltins.h>
 #include <clad/Differentiator/Differentiator.h>
 #include <clad/Differentiator/STLBuiltins.h>
-#include <cladtorch/cladtorch.hpp>
+#include "llm.hpp"
+#include "tokenizer.hpp"
 #include "dataloader.hpp"
 
 using namespace gpt2;
