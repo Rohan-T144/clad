@@ -546,31 +546,49 @@ void operator_divide_pullback(const ::cladtorch::Tensor<float>* _this, float sca
 }
 
 template <typename T>
-clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
-operator_equal_pushforward(::cladtorch::Tensor<T>* a, const ::cladtorch::Tensor<T>& param, ::cladtorch::Tensor<T>* d_a,
-                           const ::cladtorch::Tensor<T>& d_param) {
-  *a = param;
-  *d_a = d_param;
-  return {*a, *d_a};
-}
-
-template <typename T>
-clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
-operator_equal_reverse_forw(::cladtorch::Tensor<T>* a, ::cladtorch::Tensor<T>&& param, ::cladtorch::Tensor<T>* d_a,
-                           ::cladtorch::Tensor<T>&& d_param) {
-  *a = param;
-  *d_a = d_param;
-  return {*a, *d_a};
-}
-
-template <typename T>
-clad::ValueAndAdjoint<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
-operator_equal_reverse_forw(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
-                            ::cladtorch::Tensor<T>* _d_this, const ::cladtorch::Tensor<T>& _d_other) {
+::clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+operator_equal_pushforward(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other, ::cladtorch::Tensor<T>* _d_this,
+                           const ::cladtorch::Tensor<T>& _d_other) {
   *_this = other;
   *_d_this = _d_other;
   return {*_this, *_d_this};
 }
+
+template <typename T>
+::clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+operator_equal_reverse_forw(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other, ::cladtorch::Tensor<T>* _d_this,
+                           const ::cladtorch::Tensor<T>& _d_other) {
+  *_this = other;
+  *_d_this = _d_other;
+  return {*_this, *_d_this};
+}
+
+// template <typename T>
+// ::clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+// operator_equal_reverse_forw(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T>&& other, ::cladtorch::Tensor<T>* _d_this,
+//                            ::cladtorch::Tensor<T>&& _d_other) {
+//   *_this = other;
+//   *_d_this = _d_other;
+//   return {*_this, *_d_this};
+// }
+
+// template <typename T>
+// ::clad::ValueAndPushforward<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+// operator_equal_pushforward(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<T>&& other, ::cladtorch::Tensor<T>* _d_this,
+//                            ::cladtorch::Tensor<T>&& _d_other) {
+//   *_this = other;
+//   *_d_this = _d_other;
+//   return {*_this, *_d_this};
+// }
+
+// template <typename T>
+// ::clad::ValueAndAdjoint<::cladtorch::Tensor<T>&, ::cladtorch::Tensor<T>&>
+// operator_equal_reverse_forw(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
+//                             ::cladtorch::Tensor<T>* _d_this, const ::cladtorch::Tensor<T>& _d_other) {
+//   *_this = other;
+//   *_d_this = _d_other;
+//   return {*_this, *_d_this};
+// }
 
 template <typename T>
 void operator_equal_pullback(::cladtorch::Tensor<T>* _this, const ::cladtorch::Tensor<T>& other,
@@ -589,7 +607,7 @@ void operator_equal_pullback(::cladtorch::Tensor<T>* _this, ::cladtorch::Tensor<
 }
 
 template <typename T>
-clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
+::clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
 constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const ::cladtorch::Tensor<T>& p,
                         const ::cladtorch::Tensor<T>& d_p) {
   ::cladtorch::Tensor<T> v(p);
@@ -605,7 +623,7 @@ void constructor_pullback(const ::cladtorch::Tensor<T>& other, ::cladtorch::Tens
 }
 
 template <typename T>
-clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
+::clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
 constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, ::cladtorch::Tensor<T>&& p,
                         ::cladtorch::Tensor<T>&& d_p) {
   ::cladtorch::Tensor<T> v(::std::move(p));
@@ -621,7 +639,7 @@ void constructor_pullback(::cladtorch::Tensor<T>&& other, ::cladtorch::Tensor<T>
 }
 
 template <typename T>
-clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
+::clad::ValueAndPushforward<::cladtorch::Tensor<T>, ::cladtorch::Tensor<T>>
 constructor_pushforward(ConstructorPushforwardTag<::cladtorch::Tensor<T>>, const ::std::vector<int>& shape,
                         const ::std::vector<int>& d_shape) {
   ::cladtorch::Tensor<T> v(shape);

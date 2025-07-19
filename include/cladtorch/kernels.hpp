@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+// #define OMP _OPENMP
 #ifdef OMP
 #include <omp.h>
 #endif
@@ -226,6 +227,7 @@ inline void linear_kernel(
     /* B, ldb    */ weight, (int)in_features,
     /* β, C, ldc */ 1.0f, output, (int)out_features
   );
+  return;
 #endif
   // Dispatch to unrolled or regular kernel based on batch_seq
   if (batch_seq % UNROLL == 0 && batch_seq >= UNROLL)
@@ -290,32 +292,36 @@ inline void view_kernel(
 
   // Fast path: contiguous memory copy when possible
   if (dst_strides.size() > 0 && dst_strides.back() == 1 && src_strides.back() == 1 &&
-      split_axis == dst_shape.size() - 1) {
+      split_axis == dst_shape.size() - 1 && split_axis < src_strides.size() && 
+      offset < static_cast<size_t>(src_shape[split_axis])) {
     size_t copy_size = dst_shape[split_axis];
     size_t outer_elements = dst_elements / copy_size;
     size_t src_stride = src_strides[split_axis];
-    size_t dst_stride = dst_strides[split_axis];
     
-    const T* src_ptr = src_data + offset;
     for (size_t i = 0; i < outer_elements; ++i) {
-      std::memcpy(dst_data + i * copy_size, src_ptr + i * src_stride * src_shape[split_axis], 
-                  copy_size * sizeof(T));
+      const T* src_ptr = src_data + offset * src_stride + i * src_stride * src_shape[split_axis];
+      T* dst_ptr = dst_data + i * copy_size;
+      std::memcpy(dst_ptr, src_ptr, copy_size * sizeof(T));
     }
     return;
   }
 
-  // Optimized path: direct stride calculation
+  // Optimized path: direct stride calculation with bounds checking
+  if (split_axis >= src_strides.size()) return;
+  
   size_t split_stride = src_strides[split_axis];
   size_t base_offset = offset * split_stride;
   
   // Calculate strides for coordinate-free indexing
   std::vector<size_t> coord_multipliers(dst_shape.size());
-  coord_multipliers.back() = 1;
-  for (long i = dst_shape.size() - 2; i >= 0; --i) {
-    coord_multipliers[i] = coord_multipliers[i + 1] * dst_shape[i + 1];
+  if (dst_shape.size() > 0) {
+    coord_multipliers.back() = 1;
+    for (long i = static_cast<long>(dst_shape.size()) - 2; i >= 0; --i) {
+      coord_multipliers[i] = coord_multipliers[i + 1] * dst_shape[i + 1];
+    }
   }
 
-#ifdef _OPENMP
+#ifdef OMP
   #pragma omp parallel for if(dst_elements > 10000)
 #endif
   for (size_t dst_idx = 0; dst_idx < dst_elements; ++dst_idx) {
@@ -323,19 +329,20 @@ inline void view_kernel(
     size_t temp_idx = dst_idx;
     
     // Direct calculation without coordinate arrays
-    for (size_t i = 0; i < dst_shape.size(); ++i) {
-      size_t coord = temp_idx / coord_multipliers[i];
-      temp_idx %= coord_multipliers[i];
-      src_idx += coord * src_strides[i];
+    for (size_t i = 0; i < dst_shape.size() && i < src_strides.size(); ++i) {
+      if (coord_multipliers[i] > 0) {
+        size_t coord = temp_idx / coord_multipliers[i];
+        temp_idx %= coord_multipliers[i];
+        if (i == split_axis) {
+          coord += offset;
+        }
+        src_idx += coord * src_strides[i];
+      }
     }
     
     dst_data[dst_idx] = src_data[src_idx];
   }
 }
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 #if defined(__SSE2__) || defined(__AVX__)
 #include <immintrin.h>
@@ -361,7 +368,7 @@ template <typename T> inline void transpose_2d_kernel(const T* src_data, T* dst_
 template <> inline void transpose_2d_kernel<float>(const float* src_data, float* dst_data, size_t rows, size_t cols) {
   constexpr size_t BLOCK_SIZE = 64;
 
-#ifdef _OPENMP
+#ifdef OMP
 #pragma omp parallel for collapse(2) if (rows * cols > 10000)
 #endif
   for (size_t i = 0; i < rows; i += BLOCK_SIZE) {
@@ -370,24 +377,30 @@ template <> inline void transpose_2d_kernel<float>(const float* src_data, float*
       size_t max_j = std::min(j + BLOCK_SIZE, cols);
 
 #ifdef __AVX__
-      // AVX vectorized inner loop for aligned blocks
+      // AVX vectorized inner loop for aligned blocks with bounds checking
       if ((max_j - j) >= 8 && (max_i - i) >= 8) {
-        for (size_t ii = i; ii < max_i; ii += 8) {
-          for (size_t jj = j; jj < max_j; jj += 8) {
-            // Load 8x8 block and transpose using AVX
+        for (size_t ii = i; ii < max_i && ii + 7 < rows; ii += 8) {
+          for (size_t jj = j; jj < max_j && jj + 7 < cols; jj += 8) {
+            // Load 8x8 block and transpose using AVX with bounds checking
             __m256 row[8];
-            for (int k = 0; k < 8; ++k)
-              row[k] = _mm256_loadu_ps(&src_data[(ii + k) * cols + jj]);
-
+            for (int k = 0; k < 8; ++k) {
+              if (ii + k < rows && jj + 7 < cols) {
+                row[k] = _mm256_loadu_ps(&src_data[(ii + k) * cols + jj]);
+              }
+            }
+            
             // Transpose 8x8 block
             __m256 tmp[8];
             for (int k = 0; k < 4; ++k) {
-              tmp[k] = _mm256_unpacklo_ps(row[2 * k], row[2 * k + 1]);
-              tmp[4 + k] = _mm256_unpackhi_ps(row[2 * k], row[2 * k + 1]);
+              tmp[k] = _mm256_unpacklo_ps(row[2*k], row[2*k+1]);
+              tmp[4+k] = _mm256_unpackhi_ps(row[2*k], row[2*k+1]);
             }
-
-            for (int k = 0; k < 8; ++k)
-              _mm256_storeu_ps(&dst_data[(jj + k) * rows + ii], tmp[k]);
+            
+            for (int k = 0; k < 8; ++k) {
+              if (jj + k < cols && ii + 7 < rows) {
+                _mm256_storeu_ps(&dst_data[(jj + k) * rows + ii], tmp[k]);
+              }
+            }
           }
         }
       } else
@@ -404,28 +417,26 @@ template <> inline void transpose_2d_kernel<float>(const float* src_data, float*
 // Cache-efficient transpose with prefetching
 template <typename T>
 inline void transpose_cache_optimized(
-  const T* src_data, T* dst_data, size_t rows, size_t cols, size_t src_row_stride, size_t dst_row_stride
+  const T* src_data, T* dst_data, size_t rows, size_t cols,
+  size_t src_row_stride, size_t dst_row_stride
 ) {
   constexpr size_t CACHE_LINE = 64 / sizeof(T);
   constexpr size_t BLOCK_SIZE = std::max(size_t(32), CACHE_LINE * 4);
-
-#ifdef _OPENMP
-#pragma omp parallel for collapse(2) if (rows * cols > 50000)
+  
+#ifdef OMP
+  #pragma omp parallel for collapse(2) if(rows * cols > 50000)
 #endif
   for (size_t i = 0; i < rows; i += BLOCK_SIZE) {
     for (size_t j = 0; j < cols; j += BLOCK_SIZE) {
       size_t max_i = std::min(i + BLOCK_SIZE, rows);
       size_t max_j = std::min(j + BLOCK_SIZE, cols);
-
+      
       for (size_t ii = i; ii < max_i; ++ii) {
-        const T* src_row = src_data + ii * src_row_stride;
-
-        // Prefetch next cache line
-        if (ii + 1 < max_i)
-          __builtin_prefetch(src_data + (ii + 1) * src_row_stride + j, 0, 1);
-
-        for (size_t jj = j; jj < max_j; ++jj)
-          dst_data[jj * dst_row_stride + ii] = src_row[jj];
+        for (size_t jj = j; jj < max_j; ++jj) {
+          if (ii < rows && jj < cols && jj < src_row_stride && ii < dst_row_stride) {
+            dst_data[jj * dst_row_stride + ii] = src_data[ii * src_row_stride + jj];
+          }
+        }
       }
     }
   }
@@ -463,24 +474,25 @@ inline void transpose_direct_kernel(
     return;
   }
 
-#ifdef _OPENMP
+#ifdef OMP
 #pragma omp parallel for if (outer_elements > 100)
 #endif
   for (size_t outer = 0; outer < outer_elements; ++outer) {
-    // Calculate base indices for this outer iteration
+    // Calculate base indices for this outer iteration with bounds checking
     size_t outer_src_base = 0;
     size_t outer_dst_base = 0;
     size_t temp_outer = outer;
-
-    for (size_t d = 0; d < src_shape.size(); ++d) {
-      if (d == dim0 || d == dim1)
-        continue;
-
-      size_t coord = temp_outer % src_shape[d];
-      temp_outer /= src_shape[d];
-
-      outer_src_base += coord * src_strides[d];
-      outer_dst_base += coord * dst_strides[d];
+    
+    for (size_t d = 0; d < src_shape.size() && d < src_strides.size() && d < dst_strides.size(); ++d) {
+      if (d == dim0 || d == dim1) continue;
+      
+      if (src_shape[d] > 0) {
+        size_t coord = temp_outer % src_shape[d];
+        temp_outer /= src_shape[d];
+        
+        outer_src_base += coord * src_strides[d];
+        outer_dst_base += coord * dst_strides[d];
+      }
     }
 
     // Transpose the 2D slice with blocking for better cache usage
@@ -589,29 +601,52 @@ inline void broadcast_kernel(
   for (int dim : dst_shape)
     total_elements *= dim;
 
-  for (size_t dst_idx = 0; dst_idx < total_elements; ++dst_idx) {
-    // Convert flat index to multi-dimensional coordinates for dst
-    std::vector<int> dst_coords(dst_shape.size());
-    size_t temp_idx = dst_idx;
-    for (long i = dst_shape.size() - 1; i >= 0; --i) {
-      dst_coords[i] = temp_idx % dst_shape[i];
-      temp_idx /= dst_shape[i];
+  // Fast path: scalar broadcasting
+  if (src_shape.size() == 1 && src_shape[0] == 1) {
+    T scalar_value = src_data[0];
+#ifdef OMP
+    #pragma omp parallel for if(total_elements > 10000)
+#endif
+    for (size_t i = 0; i < total_elements; ++i) {
+      dst_data[i] = scalar_value;
     }
+    return;
+  }
 
-    // Map dst coordinates to src coordinates with broadcasting
-    std::vector<int> src_coords(src_shape.size(), 0);
-    int src_dim = src_shape.size() - 1;
-    for (int dst_dim = dst_shape.size() - 1; dst_dim >= 0 && src_dim >= 0; --dst_dim, --src_dim)
-      if (src_shape[src_dim] == 1)
-        src_coords[src_dim] = 0; // Broadcast dimension
-      else
-        src_coords[src_dim] = dst_coords[dst_dim];
+  // Pre-compute effective strides for broadcasting with bounds checking
+  std::vector<size_t> effective_strides(dst_shape.size(), 0);
+  std::vector<size_t> coord_multipliers(dst_shape.size());
+  
+  if (dst_shape.size() > 0) {
+    coord_multipliers.back() = 1;
+    for (long i = static_cast<long>(dst_shape.size()) - 2; i >= 0; --i) {
+      coord_multipliers[i] = coord_multipliers[i + 1] * dst_shape[i + 1];
+    }
+  }
+  
+  long src_dim = static_cast<long>(src_shape.size()) - 1;
+  for (long dst_dim = static_cast<long>(dst_shape.size()) - 1; dst_dim >= 0 && src_dim >= 0; --dst_dim, --src_dim) {
+    if (src_dim < static_cast<long>(src_shape.size()) && src_dim < static_cast<long>(src_strides.size()) &&
+        dst_dim < static_cast<long>(dst_shape.size()) && src_shape[src_dim] > 1) {
+      effective_strides[dst_dim] = src_strides[src_dim];
+    }
+    // else: remains 0 for broadcast dimensions
+  }
 
-    // Convert src coordinates to flat index
+#ifdef OMP
+  #pragma omp parallel for if(total_elements > 10000)
+#endif
+  for (size_t dst_idx = 0; dst_idx < total_elements; ++dst_idx) {
     size_t src_idx = 0;
-    for (size_t i = 0; i < src_coords.size(); ++i)
-      src_idx += src_coords[i] * src_strides[i];
-
+    size_t temp_idx = dst_idx;
+    
+    // Direct calculation using pre-computed strides
+    for (size_t i = 0; i < dst_shape.size(); ++i) {
+      size_t coord = temp_idx / coord_multipliers[i];
+      temp_idx %= coord_multipliers[i];
+      src_idx += coord * effective_strides[i];
+    }
+    
     dst_data[dst_idx] = src_data[src_idx];
   }
 }
