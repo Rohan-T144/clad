@@ -29,6 +29,7 @@
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/LLVM.h" // for clang::isa
+#include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TokenKinds.h"
@@ -1610,21 +1611,16 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     // this object is always passed by reference.
     if (!nonDiff && !dfdx() && !utils::HasAnyReferenceOrPointerArgument(FD) &&
         (!baseOriginalE || MD->isConst())) {
-        bool isSubscriptOperator = false;
-        // Check if the current CallExpr is an OperatorCallExpr for operator[].
-        if (const auto* OCE = dyn_cast<CXXOperatorCallExpr>(CE)) {
-            if (OCE->getOperator() == clang::OverloadedOperatorKind::OO_Subscript) {
-                isSubscriptOperator = true;
-            }
-        }
-    
-        // Only apply the nonDiff heuristic if this call is NOT a subscript operator.
-        // By doing this, we force Clad to take the full, robust code generation path
-        // for `vec[i]`, which correctly preserves it as the base for the `.forward()` call.
-        if (!isSubscriptOperator) {
-            nonDiff = true;
-        }
+      // The result of the subscript operator may affect the derivative, such as
+      // in a case like `list[i].modify(x)`. This makes clad handle those
+      // normally.
+      if (const auto* OCE = dyn_cast<CXXOperatorCallExpr>(CE)) {
+        if (OCE->getOperator() != clang::OverloadedOperatorKind::OO_Subscript)
+          nonDiff = true;
+      } else
+        nonDiff = true;
     }
+
     // If all arguments are constant literals, then this does not contribute to
     // the gradient.
     if (!nonDiff && !isa<CXXMemberCallExpr>(CE) &&
@@ -2104,16 +2100,18 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
     } // Recreate the original call expression.
 
     if (const auto* OCE = dyn_cast<CXXOperatorCallExpr>(CE)) {
+      if (OCE->getOperator() == clang::OverloadedOperatorKind::OO_Subscript) {
+        // If the operator is subscript, we should return the adjoint expression
+        auto AdjointCallArgs = CallArgs;
+        CallArgs.insert(CallArgs.begin(), baseDiff.getExpr());
+        AdjointCallArgs.insert(AdjointCallArgs.begin(), baseDiff.getExpr_dx());
+        call = BuildOperatorCall(OCE->getOperator(), CallArgs);
+        Expr* call_dx = BuildOperatorCall(OCE->getOperator(), AdjointCallArgs);
+        return StmtDiff(call, call_dx);
+      }
       if (isMethodOperatorCall)
         CallArgs.insert(CallArgs.begin(), baseDiff.getExpr());
       call = BuildOperatorCall(OCE->getOperator(), CallArgs);
-      if (OCE->getOperator() == clang::OverloadedOperatorKind::OO_Subscript) {
-        // If the operator is subscript, we should return the adjoint expression
-        CallArgs.erase(CallArgs.begin());
-        CallArgs.insert(CallArgs.begin(), baseDiff.getExpr_dx());
-        Expr* call_dx = BuildOperatorCall(OCE->getOperator(), CallArgs);
-        return StmtDiff(call, call_dx);
-      }
       return StmtDiff(call);
     }
 
@@ -2121,7 +2119,7 @@ Expr* ReverseModeVisitor::getStdInitListSizeExpr(const Expr* E) {
                .ActOnCallExpr(getCurrentScope(), Clone(CE->getCallee()), Loc,
                               CallArgs, Loc, CUDAExecConfig)
                .get();
-    return StmtDiff(call); // what is it doing with OverloadedDerivedFn?
+    return StmtDiff(call);
   }
 
   Expr* ReverseModeVisitor::GetMultiArgCentralDiffCall(
