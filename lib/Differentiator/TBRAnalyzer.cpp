@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <memory>
 #include <set>
 
@@ -29,26 +30,8 @@
 using namespace clang;
 
 namespace clad {
-// NOLINTBEGIN(cppcoreguidelines-pro-type-union-access)
-void TBRAnalyzer::addVar(const clang::VarDecl* VD, bool forceInit) {
-  auto& curBranch = getCurBlockVarsData();
 
-  QualType varType;
-  if (const auto* arrayParam = dyn_cast<ParmVarDecl>(VD))
-    varType = arrayParam->getOriginalType();
-  else
-    varType = VD->getType();
-
-  // If varType represents auto or auto*, get the type of init.
-  if (utils::IsAutoOrAutoPtrType(varType))
-    varType = VD->getInit()->getType();
-
-  curBranch[VD] = VarData(varType, forceInit);
-}
-
-void TBRAnalyzer::markLocation(const clang::Stmt* S) {
-  m_TBRLocs.insert(S->getBeginLoc());
-}
+void TBRAnalyzer::markLocation(const clang::Stmt* S) { m_TBRLocs.insert(S); }
 
 void TBRAnalyzer::setIsRequired(const clang::Expr* E, bool isReq) {
   llvm::SmallVector<ProfileID, 2> IDSequence;
@@ -141,7 +124,8 @@ void TBRAnalyzer::Analyze(const DiffRequest& request) {
   }
 
   clang::SourceManager& SM = m_AnalysisDC->getASTContext().getSourceManager();
-  for (SourceLocation Loc : m_TBRLocs) {
+  for (const Stmt* S : m_TBRLocs) {
+    SourceLocation Loc = S->getBeginLoc();
     unsigned line = SM.getPresumedLoc(Loc).getLine();
     unsigned column = SM.getPresumedLoc(Loc).getColumn();
     LLVM_DEBUG(llvm::dbgs() << line << ":" << column << "\n");
@@ -315,19 +299,23 @@ bool TBRAnalyzer::TraverseBinaryOperator(BinaryOperator* BinOp) {
     Expr::EvalResult dummy;
     bool nonLinear = !clad_compat::Expr_EvaluateAsConstantExpr(
         R, dummy, m_AnalysisDC->getASTContext());
+    if (nonLinear)
+      startNonLinearMode();
     bool LHSIsStored =
         !utils::ShouldRecompute(L, m_AnalysisDC->getASTContext());
     if (LHSIsStored)
       setMode(/*mode=*/0);
-    else if (nonLinear)
-      startNonLinearMode();
     TraverseStmt(L);
-    if (nonLinear || LHSIsStored)
+    if (LHSIsStored)
       resetMode();
-
-    setMode(/*mode=*/0);
+    bool RHSIsStored = utils::UsefulToStore(R);
+    if (RHSIsStored)
+      setMode(/*mode=*/0);
     TraverseStmt(R);
-    resetMode();
+    if (RHSIsStored)
+      resetMode();
+    if (nonLinear)
+      resetMode();
   } else if (BinOp->isAssignmentOp()) {
     if (opCode == BO_Assign || opCode == BO_AddAssign ||
         opCode == BO_SubAssign) {
@@ -420,15 +408,12 @@ bool TBRAnalyzer::TraverseCallExpr(clang::CallExpr* CE) {
   // could proceed to the function to analyse data flow inside it.
   FunctionDecl* FD = CE->getDirectCallee();
   // Use information about parameters assuming the analysis was performed.
-  // FIXME: The analysis doesn't work with implicit functions because they don't
-  // have source locations, which TBR relies on. We need to move away from using
-  // them.
-  bool shouldAnalyzeParams =
-      m_ModifiedParams && !m_Function->isImplicit() &&
-      (m_ModifiedParams->find(FD) != m_ModifiedParams->end());
+  bool shouldAnalyzeParams = m_ModifiedParams && (m_ModifiedParams->find(FD) !=
+                                                  m_ModifiedParams->end());
   bool hasHiddenParam = (CE->getNumArgs() != FD->getNumParams());
   std::size_t maxParamIdx = FD->getNumParams() - 1;
   setMode(Mode::kMarkingMode | Mode::kNonLinearMode);
+  bool nonDiff = utils::hasNonDifferentiableAttribute(CE);
   for (std::size_t i = hasHiddenParam, e = CE->getNumArgs(); i != e; ++i) {
     clang::Expr* arg = CE->getArg(i);
     const ParmVarDecl* par = nullptr;
@@ -443,6 +428,8 @@ bool TBRAnalyzer::TraverseCallExpr(clang::CallExpr* CE) {
       if (usedParams.find(par) == usedParams.end())
         paramUnused = true;
     }
+    if (nonDiff)
+      paramUnused = true;
     if (paramUnused)
       setMode(/*mode=*/0);
     TraverseStmt(arg);
@@ -479,6 +466,8 @@ bool TBRAnalyzer::TraverseCallExpr(clang::CallExpr* CE) {
       if (usedParams.find(nullptr) == usedParams.end())
         paramUnused = true;
     }
+    if (nonDiff)
+      paramUnused = true;
     if (paramUnused)
       setMode(/*mode=*/0);
     TraverseStmt(base);
@@ -533,9 +522,9 @@ bool TBRAnalyzer::TraverseCXXConstructExpr(clang::CXXConstructExpr* CE) {
     const auto* B = arg->IgnoreParenImpCasts();
     // FIXME: this supports only DeclRefExpr
     if (passByRef) {
-      // Mark SourceLocation as required for ref-type arguments.
+      // Mark the args as required for ref-type arguments.
       if (isa<DeclRefExpr>(B) || isa<MemberExpr>(B)) {
-        m_TBRLocs.insert(arg->getBeginLoc());
+        m_TBRLocs.insert(arg);
         setIsRequired(arg, /*isReq=*/false);
       }
     }

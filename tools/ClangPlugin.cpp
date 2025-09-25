@@ -27,11 +27,12 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Sema.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "clad/Differentiator/CladUtils.h"
 #include "clad/Differentiator/Compatibility.h"
-#include <clad/Differentiator/DiffMode.h>
 
 #include <algorithm>
 #include <cstdlib>  // for getenv
@@ -222,10 +223,6 @@ void InitTimers();
         return nullptr;
       }
 
-      // Required due to custom derivatives function templates that might be
-      // used in the function that we need to derive.
-      // FIXME: Remove the call to PerformPendingInstantiations().
-      S.PerformPendingInstantiations();
       if (request.Function->getDefinition())
         request.Function = request.Function->getDefinition();
       // FIXME: These requests are not fully generated in the diffplanner and we
@@ -279,6 +276,8 @@ void InitTimers();
       bool alreadyDerived = false;
       FunctionDecl* OverloadedDerivativeDecl = nullptr;
       {
+        llvm::SaveAndRestore<unsigned> Saved(request.RequestedDerivativeOrder,
+                                             1);
         auto DFI = m_DFC.Find(request);
         if (DFI.IsValid()) {
           DerivativeDecl = DFI.DerivedFn();
@@ -288,21 +287,30 @@ void InitTimers();
           auto deriveResult = m_DerivativeBuilder->Derive(request);
           DerivativeDecl = cast_or_null<FunctionDecl>(deriveResult.derivative);
           OverloadedDerivativeDecl = deriveResult.overload;
+          // FIXME: Doing this with other function types might lead to
+          // accidental numerical diff.
+          if (isa<CXXConstructorDecl>(FD) &&
+              utils::hasEmptyBody(DerivativeDecl))
+            return nullptr;
           if (DerivativeDecl)
             m_DFC.Add(DerivedFnInfo(request, DerivativeDecl,
                                     OverloadedDerivativeDecl));
         }
       }
 
+      if (OverloadedDerivativeDecl) {
+        S.MarkFunctionReferenced(SourceLocation(), OverloadedDerivativeDecl);
+        DelayedCallInfo DCI{CallKind::HandleTopLevelDecl,
+                            OverloadedDerivativeDecl};
+        if (!llvm::is_contained(m_DelayedCalls, DCI))
+          ProcessTopLevelDecl(OverloadedDerivativeDecl);
+      }
       if (DerivativeDecl) {
-        if (!(alreadyDerived || request.CustomDerivative)) {
+        if (!alreadyDerived &&
+            (!request.CustomDerivative || request.CallUpdateRequired)) {
           printDerivative(DerivativeDecl, request.DeclarationOnly, m_DO);
 
           S.MarkFunctionReferenced(SourceLocation(), DerivativeDecl);
-          if (OverloadedDerivativeDecl)
-            S.MarkFunctionReferenced(SourceLocation(),
-                                     OverloadedDerivativeDecl);
-
           // We ideally should not call `HandleTopLevelDecl` for declarations
           // inside a namespace. After parsing a namespace that is defined
           // directly in translation unit context , clang calls
@@ -318,13 +326,11 @@ void InitTimers();
           // FIXME: We could get rid of this by prepending the produced
           // derivatives in CladPlugin::HandleTranslationUnitDecl
           DeclContext* derivativeDC = DerivativeDecl->getLexicalDeclContext();
+          DelayedCallInfo DCI{CallKind::HandleTopLevelDecl, DerivativeDecl};
           bool isTUorND =
               derivativeDC->isTranslationUnit() || derivativeDC->isNamespace();
-          if (isTUorND) {
+          if (isTUorND && !llvm::is_contained(m_DelayedCalls, DCI))
             ProcessTopLevelDecl(DerivativeDecl);
-            if (OverloadedDerivativeDecl)
-              ProcessTopLevelDecl(OverloadedDerivativeDecl);
-          }
         }
         bool lastDerivativeOrder = (request.CurrentDerivativeOrder ==
                                     request.RequestedDerivativeOrder);
@@ -475,8 +481,10 @@ void InitTimers();
       if (!m_CI.getPreprocessor().isIncrementalProcessingEnabled())
         S.TUScope = m_StoredTUScope;
       constexpr bool Enabled = true;
-      Sema::GlobalEagerInstantiationScope GlobalInstantiations(S, Enabled);
-      Sema::LocalEagerInstantiationScope LocalInstantiations(S);
+      Sema::GlobalEagerInstantiationScope GlobalInstantiations(
+          S, Enabled CLAD_COMPAT_CLANG21_AtEndOfTUParam);
+      Sema::LocalEagerInstantiationScope LocalInstantiations(
+          S CLAD_COMPAT_CLANG21_AtEndOfTUParam);
 
       if (!m_DiffRequestGraph.isProcessingNode()) {
         // This check is to avoid recursive processing of the graph, as

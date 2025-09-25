@@ -8,15 +8,17 @@
 
 #include "ConstantFolder.h"
 
-#include "llvm/Support/Casting.h"
 #include "clad/Differentiator/CladUtils.h"
 #include "clad/Differentiator/DiffPlanner.h"
 #include "clad/Differentiator/ErrorEstimator.h"
 #include "clad/Differentiator/MultiplexExternalRMVSource.h"
+#include "clad/Differentiator/ParseDiffArgsTypes.h"
 #include "clad/Differentiator/Sins.h"
 #include "clad/Differentiator/StmtClone.h"
+#include "llvm/Support/Casting.h"
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attrs.inc"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/NestedNameSpecifier.h"
@@ -67,7 +69,7 @@ namespace clad {
     if (!S)
       return false;
     if (Expr* E = dyn_cast<Expr>(S)) {
-      if (isUnusedResult(E))
+      if (isUnusedResult(E->IgnoreCasts()))
         return false;
     }
     block.push_back(S);
@@ -309,9 +311,12 @@ namespace clad {
     // For intermediate variables, use numbered names (_t0), for everything
     // else first try a name without number (e.g. first try to use _d_x and
     // use _d_x0 only if _d_x is taken).
-    bool countedName = nameBase.starts_with("_") &&
-                       !nameBase.starts_with("_d_") &&
-                       !nameBase.starts_with("_delta_") && nameBase != "_this";
+    bool isRangedVar = !nameBase.starts_with("__range") &&
+                       !nameBase.starts_with("__end") &&
+                       !nameBase.starts_with("__begin");
+    bool countedName =
+        nameBase.starts_with("_") && !nameBase.starts_with("_d_") &&
+        !nameBase.starts_with("_delta_") && isRangedVar && nameBase != "_this";
     std::size_t idx = 0;
     std::size_t& id = countedName ? m_idCtr[nameBase.str()] : idx;
     std::string idStr = countedName ? std::to_string(id) : "";
@@ -360,35 +365,13 @@ namespace clad {
     return StoreAndRef(E, Type, block, prefix, forceDeclCreation);
   }
 
-  bool VisitorBase::UsefulToStore(Expr* E) {
-    if (!E)
-      return false;
-    Expr* B = E->IgnoreParenImpCasts();
-    // FIXME: find a more general way to determine that or add more options.
-    if (isa<DeclRefExpr>(B) || isa<FloatingLiteral>(B) ||
-        isa<IntegerLiteral>(B))
-      return false;
-    if (isa<UnaryOperator>(B)) {
-      auto UO = cast<UnaryOperator>(B);
-      auto OpKind = UO->getOpcode();
-      if (OpKind == UO_Plus || OpKind == UO_Minus)
-        return UsefulToStore(UO->getSubExpr());
-      return false;
-    }
-    if (isa<ArraySubscriptExpr>(B)) {
-      auto ASE = cast<ArraySubscriptExpr>(B);
-      return UsefulToStore(ASE->getBase()) || UsefulToStore(ASE->getIdx());
-    }
-    return true;
-  }
-
   Expr* VisitorBase::StoreAndRef(Expr* E, QualType Type, Stmts& block,
                                  llvm::StringRef prefix,
                                  bool forceDeclCreation) {
     if (!forceDeclCreation) {
       // If Expr is simple (i.e. a reference or a literal), there is no point
       // in storing it as there is no evaluation going on.
-      if (!UsefulToStore(E))
+      if (!utils::UsefulToStore(E))
         return E;
     }
     // Create variable declaration.
@@ -856,9 +839,12 @@ namespace clad {
                                       GetCladConstructorReverseForwTag(), {T});
   }
 
-  FunctionDecl* VisitorBase::CreateDerivativeOverload() {
-    auto diffParams = m_Derivative->parameters();
-    auto diffNameInfo = m_Derivative->getNameInfo();
+  FunctionDecl*
+  VisitorBase::CreateDerivativeOverload(FunctionDecl* derivative) {
+    if (!derivative)
+      derivative = m_Derivative;
+    auto diffParams = derivative->parameters();
+    auto diffNameInfo = derivative->getNameInfo();
     // Calculate the total number of parameters that would be required for
     // automatic differentiation in the derived function if all args are
     // requested.
@@ -981,12 +967,12 @@ namespace clad {
     // If the function is a global kernel, we need to transform it
     // into a device function when calling it inside the overload function
     // which is the final global kernel returned.
-    if (m_Derivative->hasAttr<clang::CUDAGlobalAttr>()) {
-      m_Derivative->dropAttr<clang::CUDAGlobalAttr>();
-      m_Derivative->addAttr(clang::CUDADeviceAttr::CreateImplicit(m_Context));
+    if (derivative->hasAttr<clang::CUDAGlobalAttr>()) {
+      derivative->dropAttr<clang::CUDAGlobalAttr>();
+      derivative->addAttr(clang::CUDADeviceAttr::CreateImplicit(m_Context));
     }
 
-    Expr* callExpr = BuildCallExprToFunction(m_Derivative, callArgs,
+    Expr* callExpr = BuildCallExprToFunction(derivative, callArgs,
                                              /*useRefQualifiedThisObj=*/true);
     addToCurrentBlock(callExpr);
     Stmt* diffOverloadBody = endBlock();
@@ -1009,7 +995,7 @@ namespace clad {
     for (const DiffInputVarInfo& VarInfo : m_DiffReq.DVI)
       diffParams.push_back(VarInfo.param);
     return utils::GetDerivativeType(m_Sema, m_DiffReq.Function, m_DiffReq.Mode,
-                                    diffParams, /*moveBaseToParams=*/false,
+                                    diffParams, /*forCustomDerv=*/false,
                                     customParams);
   }
 

@@ -64,6 +64,7 @@ namespace clad {
 
     void updateStmt(clang::Stmt* S) { data[1] = S; }
     void updateStmtDx(clang::Stmt* S) { data[0] = S; }
+    void updateRevSweep(clang::Stmt* S) { m_ValueForRevSweep = S; }
     // Stmt_dx goes first!
     std::array<clang::Stmt*, 2>& getBothStmts() { return data; }
 
@@ -405,10 +406,6 @@ namespace clad {
     clang::Expr* StoreAndRef(clang::Expr* E, clang::QualType Type, Stmts& block,
                              llvm::StringRef prefix = "_t",
                              bool forceDeclCreation = false);
-    /// For an expr E, decides if it is useful to store it in a temporary
-    /// variable and replace E's further usage by a reference to that variable
-    /// to avoid recomputation.
-    static bool UsefulToStore(clang::Expr* E);
     /// A flag for silencing warnings/errors output by diag function.
     /// Shorthand to issues a warning or error.
     template <std::size_t N>
@@ -604,12 +601,6 @@ namespace clad {
 
     /// Returns type clad::ConstructorReverseForwTag<T>
     clang::QualType GetCladConstructorReverseForwTagOfType(clang::QualType T);
-
-    /// Builds an overload for the derivative function that has derived params
-    /// for all the arguments of the requested function and it calls the
-    /// original derivative function internally. Used in gradient and jacobian
-    /// modes.
-    clang::FunctionDecl* CreateDerivativeOverload();
     /// Find the derived function if present in the DerivedFnCollector.
     ///
     /// \param[in] request The request to find the derived function.
@@ -618,6 +609,12 @@ namespace clad {
     clang::FunctionDecl* FindDerivedFunction(DiffRequest& request);
 
   public:
+    /// Builds an overload for the derivative function that has derived params
+    /// for all the arguments of the requested function and it calls the
+    /// original derivative function internally. Used in gradient and jacobian
+    /// modes.
+    clang::FunctionDecl*
+    CreateDerivativeOverload(clang::FunctionDecl derivative);
     /// Rebuild a sequence of nested namespaces ending with DC.
     clang::NamespaceDecl* RebuildEnclosingNamespaces(clang::DeclContext* DC);
     /// Clones a statement
@@ -634,10 +631,17 @@ namespace clad {
 
     /// Builds the QualType of the derivative to be generated.
     ///
-    /// \param[in] moveBaseToParams If true, turns member functions into regular
+    /// \param[in] forCustomDerv If true, turns member functions into regular
     /// functions by moving the base to the parameters.
     clang::QualType
     GetDerivativeType(llvm::ArrayRef<clang::QualType> customParams = {});
+
+    /// Builds an overload for the derivative function that has derived params
+    /// for all the arguments of the requested function and it calls the
+    /// original derivative function internally. Used in gradient and jacobian
+    /// modes.
+    clang::FunctionDecl*
+    CreateDerivativeOverload(clang::FunctionDecl* derivative = nullptr);
 
     /// Computes effective derivative operands. It should be used when operands
     /// might be of pointer types.

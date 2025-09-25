@@ -17,6 +17,7 @@
 #include "FunctionTraits.h"
 #include "Matrix.h"
 #include "NumericalDiff.h"
+#include "RestoreTracker.h"
 #include "Tape.h"
 
 #include <array>
@@ -54,7 +55,7 @@ inline CUDA_HOST_DEVICE unsigned int GetLength(const char* code) {
 
 /// Tape type used for storing values in reverse-mode AD inside loops.
 template <typename T, std::size_t SBO_SIZE = 64, std::size_t SLAB_SIZE = 1024>
-using tape = tape_impl<T>;
+using tape = tape_impl<T, SBO_SIZE, SLAB_SIZE>;
 
 /// Add value to the end of the tape, return the same value.
 template <typename T, std::size_t SBO_SIZE = 64, std::size_t SLAB_SIZE = 1024,
